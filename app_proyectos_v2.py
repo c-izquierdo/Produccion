@@ -14,6 +14,35 @@ import altair as alt
 import streamlit as st
 import streamlit.components.v1 as components
 
+def check_password():
+    import streamlit as st
+
+    def password_entered():
+        if (
+            st.session_state.get("username") == st.secrets["auth"]["user"]
+            and st.session_state.get("password") == st.secrets["auth"]["password"]
+        ):
+            st.session_state["authenticated"] = True
+        else:
+            st.session_state["authenticated"] = False
+
+    if "authenticated" not in st.session_state:
+        st.text_input("Usuario", key="username")
+        st.text_input("Contraseña", type="password", key="password")
+        st.button("Ingresar", on_click=password_entered)
+        return False
+    elif not st.session_state["authenticated"]:
+        st.text_input("Usuario", key="username")
+        st.text_input("Contraseña", type="password", key="password")
+        st.button("Ingresar", on_click=password_entered)
+        st.error("Usuario o contraseña incorrectos")
+        return False
+    else:
+        return True
+
+
+if not check_password():
+    st.stop()
 
 # ============================================================
 # CONFIG
