@@ -1313,7 +1313,7 @@ HOY = pd.to_datetime(
     st.sidebar.date_input("Fecha base", value=pd.Timestamp.today())
 )
 
-ritmo_taller = st.sidebar.number_input("Ritmo base Taller", value=75.0)
+ritmo_taller = st.sidebar.number_input("Ritmo base Taller", value=80.0)
 ritmo_lavado = st.sidebar.number_input("Ritmo base Lavado", value=100.0)
 
 autosave = st.sidebar.checkbox("Guardar automáticamente en Excel", value=True)
