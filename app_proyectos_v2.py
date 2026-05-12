@@ -176,33 +176,12 @@ def df_to_markdown_safe(df: pd.DataFrame, index: bool = False) -> str:
             rows.append("| " + " | ".join([str(x) if pd.notna(x) else "" for x in r.values]) + " |\n")
         return header + sep + "".join(rows)
 
+
 def df_to_teams_codeblock(df: pd.DataFrame) -> str:
-    if df is None or df.empty:
-        body = "(sin datos)"
-    else:
-        try:
-            from tabulate import tabulate
-            body = tabulate(df, headers="keys", tablefmt="psql", showindex=False)
-        except Exception:
-            # fallback: TSV alineado “razonable”
-            body = df.to_csv(sep="\t", index=False)
+    """Devuelve un bloque monoespaciado para pegar en Teams sin desorden."""
+    body = df_to_pretty_text(df)
     return f"```\n{body}\n```"
 
-def df_to_pretty_text(df: pd.DataFrame) -> str:
-    """Texto alineado para TXT (ideal para Teams en bloque de código)."""
-    if df is None or df.empty:
-        return "(sin datos)"
-    try:
-        from tabulate import tabulate
-        return tabulate(df, headers="keys", tablefmt="psql", showindex=False)
-    except Exception:
-        # fallback TSV (menos bonito, pero estable)
-        return df.to_csv(sep="\t", index=False)
-
-def df_to_teams_codeblock(df: pd.DataFrame) -> str:
-    """Esto es lo que copias/pegas en Teams para que NO se desordene."""
-    body = df_to_pretty_text(df)
-    return f"{body}"
 
 def copy_button(text: str, label: str, key: str):
     """Botón copiar al portapapeles usando JS (funciona en la mayoría de navegadores)."""
@@ -238,6 +217,17 @@ def copy_button(text: str, label: str, key: str):
     """
     components.html(html, height=50)
 
+def df_to_pretty_text(df: pd.DataFrame) -> str:
+    """Texto alineado para TXT (ideal para Teams o archivos de texto)."""
+    if df is None or df.empty:
+        return "(sin datos)"
+    try:
+        from tabulate import tabulate
+        return tabulate(df, headers="keys", tablefmt="psql", showindex=False)
+    except Exception:
+        # Fallback estable: TSV
+        return df.to_csv(sep="\t", index=False)
+
 def export_block(df: pd.DataFrame, *, name: str, key_prefix: str):
     """Bloque estándar: Copiar Teams + export MD + export TXT + preview opcional."""
     md = df_to_markdown_safe(df, index=False)
@@ -267,19 +257,19 @@ def export_block(df: pd.DataFrame, *, name: str, key_prefix: str):
 # =========================
 # Editor estable (fix definitivo) - igual al app.py
 # =========================
-ROWID_COL = "__rowid"
 
 def ensure_rowid(df: pd.DataFrame, col: str = ROWID_COL) -> pd.DataFrame:
+    """Asegura __rowid no nulo, único y estable."""
     df = df.copy()
     if col not in df.columns:
         df[col] = [uuid.uuid4().hex for _ in range(len(df))]
     else:
         df[col] = df[col].astype(str)
-        mask = df[col].isna() | (df[col].str.strip() == "") | (df[col].str.lower() == "nan")
-        if mask.any():
-            df.loc[mask, col] = [uuid.uuid4().hex for _ in range(int(mask.sum()))]
 
-    # Garantiza unicidad
+    mask = df[col].isna() | (df[col].str.strip() == "") | (df[col].str.lower() == "nan")
+    if mask.any():
+        df.loc[mask, col] = [uuid.uuid4().hex for _ in range(int(mask.sum()))]
+
     dup = df[col].duplicated(keep=False)
     if dup.any():
         seen = set()
@@ -292,17 +282,15 @@ def ensure_rowid(df: pd.DataFrame, col: str = ROWID_COL) -> pd.DataFrame:
                 new_vals.append(v)
         df[col] = new_vals
 
-    # Forzar __rowid al final
-    if col in df.columns:
-        cols = [c for c in df.columns if c != col] + [col]
-        df = df[cols]
-
-    return df
+    # __rowid al final
+    cols = [c for c in df.columns if c != col] + [col]
+    return df[cols]
 
 def drop_internal_cols(df: pd.DataFrame) -> pd.DataFrame:
     return df.drop(columns=[c for c in df.columns if c.startswith("__")], errors="ignore")
 
 def _apply_editor_delta(df_key: str, widget_key: str, schema_fn):
+    """Aplica delta (edited/deleted/added) del data_editor a la tabla base en session_state."""
     delta = st.session_state.get(widget_key)
     if not isinstance(delta, dict):
         return
@@ -347,19 +335,28 @@ def _apply_editor_delta(df_key: str, widget_key: str, schema_fn):
     added_rows = delta.get("added_rows", []) or []
     if added_rows:
         new_df = pd.DataFrame(added_rows)
+
+        # ✅ Asegura Avance_pct para que una fila nueva no quede filtrada por accidente
+        if "Avance_pct" in base_i.columns and "Avance_pct" not in new_df.columns:
+            new_df["Avance_pct"] = 0
+        if "Avance_pct" in new_df.columns:
+            new_df["Avance_pct"] = pd.to_numeric(new_df["Avance_pct"], errors="coerce").fillna(0)
+
         new_df = ensure_rowid(new_df)
+
         # Alinea columnas a base
         for c in base_i.columns:
             if c not in new_df.columns:
                 new_df[c] = np.nan
         new_df = new_df[base_i.columns]
+
         base_i = pd.concat([base_i, new_df], axis=0)
 
+    # 4) ✅ MUY IMPORTANTE: guardar de vuelta en session_state (y aplicar schema)
     out = base_i.reset_index(drop=True)
-
-    # Normaliza esquema preservando __rowid
     out = schema_fn(out) if schema_fn is not None else ensure_rowid(out)
     st.session_state[df_key] = out
+
 
 def stable_data_editor(
     *,
@@ -371,6 +368,7 @@ def stable_data_editor(
     height: int | None = None,
     num_rows: str = "dynamic",
 ):
+    """Editor estable: permite editar/agregar/borrar incluso con view_df filtrada, usando __rowid."""
     if df_key not in st.session_state:
         st.session_state[df_key] = pd.DataFrame()
 
@@ -384,6 +382,7 @@ def stable_data_editor(
     if ROWID_COL in editor_df.columns:
         editor_df = editor_df[[c for c in editor_df.columns if c != ROWID_COL] + [ROWID_COL]]
 
+    # Mapa de filas visibles -> __rowid
     st.session_state[f"{widget_key}__rowids"] = editor_df[ROWID_COL].astype(str).tolist()
 
     def _cb():
@@ -405,6 +404,7 @@ def stable_data_editor(
         height=height,
     )
 
+    return st.session_state[df_key]
     return st.session_state[df_key]
 
 def schema_proyectos_keep_rowid(df: pd.DataFrame) -> pd.DataFrame:
@@ -505,16 +505,6 @@ def _df_height(df, header_px=45, row_px=35, min_px=180):
 # ROWID ESTABLE
 # ============================================================
 
-def ensure_rowid(df):
-    df = df.copy()
-    if ROWID_COL not in df.columns:
-        df[ROWID_COL] = [uuid.uuid4().hex for _ in range(len(df))]
-    return df
-
-
-def drop_internal_cols(df):
-    return df.drop(columns=[c for c in df.columns if c.startswith("__")], errors="ignore")
-
 def normalizar_proyectos(df_proy: pd.DataFrame) -> pd.DataFrame:
     df = df_proy.copy()
 
@@ -559,6 +549,15 @@ def next_bday(ts):
         ts += pd.Timedelta(days=1)
     return ts
 
+def add_bdays(start, n):
+    """Suma n días hábiles (L-V). Mantiene la semántica de +Timedelta(days=n) pero sin fines de semana."""
+    start_ts = pd.Timestamp(start).normalize()
+    n = int(n)
+    if n <= 0:
+        return start_ts
+    # np.busday_offset: cuenta solo L-V (no considera festivos; si lo necesitas se puede extender)
+    d = np.busday_offset(start_ts.date(), n, roll="forward")
+    return pd.Timestamp(d).normalize()
 
 def ceil_days(m2_rest, ritmo):
     if m2_rest <= 0 or ritmo <= 0:
@@ -601,7 +600,7 @@ def programa_linea(df, ritmo_base, hoy):
         dias = ceil_days(restante, float(ritmo.iloc[i]))
 
         inicio = fecha_actual
-        fin = inicio + pd.Timedelta(days=max(0, dias))
+        fin = add_bdays(inicio, max(0, dias))
 
         inicios.append(inicio.date())
         fines.append(fin.date())
@@ -625,20 +624,6 @@ def programa_linea(df, ritmo_base, hoy):
                 holguras.append(int(h))
 
         fecha_actual = fin  # encadena
-
-    return pd.DataFrame({
-        "Proyecto": df["Proyecto"] if "Proyecto" in df.columns else "",
-        "Constructora": df["Constructora"] if "Constructora" in df.columns else "",
-        "Tipo": df["Tipo"] if "Tipo" in df.columns else "",
-        "M2": m2,
-        "Avance %": avance,
-        "Fecha Requerida": req.dt.date,
-        "Inicio prog": inicios,
-        "Fin prog": fines,
-        "Holgura": holguras,
-        "Estado": estados,
-    })
-
 
     return pd.DataFrame({
         "Proyecto": df["Proyecto"] if "Proyecto" in df.columns else "",
@@ -759,17 +744,24 @@ def _obras_from_proyectos_v2(proy: pd.DataFrame) -> pd.DataFrame:
     return out
 
 
-def _simular_pieza(stock_df: pd.DataFrame, obras_df: pd.DataFrame, pieza_prefix: str):
+def _simular_pieza(stock_df: pd.DataFrame, obras_df: pd.DataFrame, pieza_prefix: str, return_events: bool = False):
     """
-    Copiado de la app anterior: simula stock nuevo/usado/total en el tiempo.
-    Para VENTA: descuenta nuevo desde Inicio_obra (no vuelve).
+    Simula stock nuevo/usado/total en el tiempo.
+
+    Para VENTA: descuenta NUEVO desde Inicio_obra (no vuelve).
     Para ARRIENDO: descuenta durante la obra y devuelve TODO como USADO al término.
+
+    NUEVO (opcional):
+    - Si return_events=True, devuelve además un DataFrame 'eventos_df' con:
+      Fecha, Proyecto, Tipo_evento, Cambio, usado, nuevo
     """
     col_usado = f"{pieza_prefix}_usado"
     col_nuevo = f"{pieza_prefix}_nuevo"
 
     stock = stock_df.copy()
     if stock.empty:
+        if return_events:
+            return pd.DataFrame(), pd.DataFrame(), pd.DataFrame(), pd.DataFrame()
         return pd.DataFrame(), pd.DataFrame(), pd.DataFrame()
 
     obras = obras_df.copy()
@@ -778,17 +770,28 @@ def _simular_pieza(stock_df: pd.DataFrame, obras_df: pd.DataFrame, pieza_prefix:
     ventas = obras[obras["Tipo"].str.upper() == "VENTA"].copy()
     arrs = obras[(obras["Tipo"].str.upper() == "ARRIENDO") & (~obras["Termino_obra"].isna())].copy()
 
+    # --- Eventos (para identificar qué proyecto provoca cambios por fecha) ---
+    eventos = []
+
+    # Fechas relevantes
     fechas_evt = set(stock["Fecha"].dt.normalize())
     fechas_evt.update(ventas["Inicio_obra"].dt.normalize())
     fechas_evt.update(arrs["Inicio_obra"].dt.normalize())
     fechas_evt.update(arrs["Termino_obra"].dt.normalize())
 
     if not fechas_evt:
+        if return_events:
+            return pd.DataFrame(), pd.DataFrame(), pd.DataFrame(), pd.DataFrame()
         return pd.DataFrame(), pd.DataFrame(), pd.DataFrame()
 
     fechas = sorted(fechas_evt)
 
-    stock_by_date = stock.groupby(stock["Fecha"].dt.normalize())[[f"{pieza_prefix}_nuevo", f"{pieza_prefix}_usado"]].sum()
+    # Agregados por fecha
+    stock_by_date = (
+        stock.groupby(stock["Fecha"].dt.normalize())[[f"{pieza_prefix}_nuevo", f"{pieza_prefix}_usado"]]
+        .sum()
+    )
+
     ventas_by_date = ventas.groupby(ventas["Inicio_obra"].dt.normalize())[col_nuevo].sum()
 
     arrs = arrs.copy()
@@ -809,8 +812,20 @@ def _simular_pieza(stock_df: pd.DataFrame, obras_df: pd.DataFrame, pieza_prefix:
     for d in fechas:
         # 1) Entradas de stock (inicial/compras)
         if d in stock_by_date.index:
-            stock_nuevo += float(stock_by_date.loc[d, f"{pieza_prefix}_nuevo"])
-            stock_usado += float(stock_by_date.loc[d, f"{pieza_prefix}_usado"])
+            inc_nuevo = float(stock_by_date.loc[d, f"{pieza_prefix}_nuevo"])
+            inc_usado = float(stock_by_date.loc[d, f"{pieza_prefix}_usado"])
+            stock_nuevo += inc_nuevo
+            stock_usado += inc_usado
+
+            if (inc_nuevo != 0) or (inc_usado != 0):
+                eventos.append({
+                    "Fecha": d,
+                    "Proyecto": "(Stock)",
+                    "Tipo_evento": "Entrada stock",
+                    "Cambio": inc_nuevo + inc_usado,
+                    "nuevo": inc_nuevo,
+                    "usado": inc_usado,
+                })
 
         # 2) Devolución arriendos que terminan hoy (todo vuelve como usado)
         if d in terminos_map:
@@ -818,12 +833,48 @@ def _simular_pieza(stock_df: pd.DataFrame, obras_df: pd.DataFrame, pieza_prefix:
                 row = arrs.loc[idx]
                 usado_dem = float(row[col_usado])
                 nuevo_dem = float(row[col_nuevo])
+
                 stock_usado += usado_dem + nuevo_dem
+
+                cambio_total = (usado_dem + nuevo_dem)
+                if cambio_total != 0:
+                    eventos.append({
+                        "Fecha": d,
+                        "Proyecto": row.get("Proyecto", ""),
+                        "Tipo_evento": "Término obra (Devolución)",
+                        "Cambio": cambio_total,
+                        "nuevo": 0.0,
+                        "usado": cambio_total,
+                    })
 
         # 3) Ventas que se van hoy (consumo definitivo de nuevo)
         if d in ventas_by_date.index:
             q_vta = float(ventas_by_date.loc[d])
             stock_nuevo -= q_vta
+
+            ventas_hoy = ventas[ventas["Inicio_obra"].dt.normalize() == d]
+            if not ventas_hoy.empty:
+                for _, r in ventas_hoy.iterrows():
+                    q = float(r.get(col_nuevo, 0) if pd.notna(r.get(col_nuevo, 0)) else 0)
+                    if q != 0:
+                        eventos.append({
+                            "Fecha": d,
+                            "Proyecto": r.get("Proyecto", ""),
+                            "Tipo_evento": "Venta",
+                            "Cambio": -q,
+                            "nuevo": -q,
+                            "usado": 0.0,
+                        })
+            else:
+                if q_vta != 0:
+                    eventos.append({
+                        "Fecha": d,
+                        "Proyecto": "(Venta)",
+                        "Tipo_evento": "Venta",
+                        "Cambio": -q_vta,
+                        "nuevo": -q_vta,
+                        "usado": 0.0,
+                    })
 
         # 4) Arriendos que comienzan hoy (descuentan stock)
         if d in arrs_start.index:
@@ -832,7 +883,39 @@ def _simular_pieza(stock_df: pd.DataFrame, obras_df: pd.DataFrame, pieza_prefix:
             stock_usado -= usado_dem
             stock_nuevo -= nuevo_dem
 
-        registros.append({"Fecha": d, "nuevo": stock_nuevo, "usado": stock_usado, "total": stock_nuevo + stock_usado})
+            arrs_hoy = arrs[arrs["Inicio_norm"] == d]
+            if not arrs_hoy.empty:
+                for _, r in arrs_hoy.iterrows():
+                    u = float(r.get(col_usado, 0) if pd.notna(r.get(col_usado, 0)) else 0)
+                    n = float(r.get(col_nuevo, 0) if pd.notna(r.get(col_nuevo, 0)) else 0)
+                    tot = u + n
+                    if tot != 0:
+                        eventos.append({
+                            "Fecha": d,
+                            "Proyecto": r.get("Proyecto", ""),
+                            "Tipo_evento": "Inicio obra (Arriendo)",
+                            "Cambio": -tot,
+                            "nuevo": -n,
+                            "usado": -u,
+                        })
+            else:
+                tot = usado_dem + nuevo_dem
+                if tot != 0:
+                    eventos.append({
+                        "Fecha": d,
+                        "Proyecto": "(Arriendo)",
+                        "Tipo_evento": "Inicio obra (Arriendo)",
+                        "Cambio": -tot,
+                        "nuevo": -nuevo_dem,
+                        "usado": -usado_dem,
+                    })
+
+        registros.append({
+            "Fecha": d,
+            "nuevo": stock_nuevo,
+            "usado": stock_usado,
+            "total": stock_nuevo + stock_usado
+        })
 
     stock_out = pd.DataFrame(registros).set_index("Fecha").sort_index()
 
@@ -859,25 +942,82 @@ def _simular_pieza(stock_df: pd.DataFrame, obras_df: pd.DataFrame, pieza_prefix:
     if not alertas.empty:
         alertas["deficit"] = -alertas["total"]
 
+    eventos_df = pd.DataFrame(eventos)
+    if not eventos_df.empty:
+        eventos_df["Fecha"] = pd.to_datetime(eventos_df["Fecha"], errors="coerce").dt.normalize()
+        eventos_df["Cambio"] = pd.to_numeric(eventos_df["Cambio"], errors="coerce").fillna(0)
+
+    if return_events:
+        return stock_out, uso_proj, alertas, eventos_df
     return stock_out, uso_proj, alertas
 
 
-def step_line_chart(df: pd.DataFrame, cols, y_title="Piezas", height=260):
-    """Gráfico escalonado con hover (igual app anterior)."""
+def step_line_chart(df: pd.DataFrame, cols, y_title="Piezas", height=260, eventos_df=None):
+    """Gráfico escalonado con hover + panel detalle. Ahora incluye eventos (proyecto responsable) si eventos_df está presente."""
     if df is None or df.empty:
         return
 
+    # ---- Base (wide) ----
     wide = df.copy()
     idx_name = wide.index.name or "Fecha"
     wide = wide.reset_index().rename(columns={idx_name: "Fecha"})
-    wide["Fecha"] = pd.to_datetime(wide["Fecha"], errors="coerce")
+    wide["Fecha"] = pd.to_datetime(wide["Fecha"], errors="coerce").dt.normalize()
     wide = wide.dropna(subset=["Fecha"]).sort_values("Fecha")
 
-    long = wide.melt(id_vars="Fecha", value_vars=list(cols), var_name="Serie", value_name="Valor")
+    # ---- Preparar eventos (si vienen) ----
+    ev = None
+    ev_dates = None
+    if eventos_df is not None and isinstance(eventos_df, pd.DataFrame) and not eventos_df.empty:
+        ev = eventos_df.copy()
+        ev["Fecha"] = pd.to_datetime(ev["Fecha"], errors="coerce").dt.normalize()
+        ev = ev.dropna(subset=["Fecha"]).copy()
+        ev["Cambio"] = pd.to_numeric(ev.get("Cambio", 0), errors="coerce").fillna(0)
+
+        # Conteo eventos por fecha (para mostrar "Sin eventos")
+        ev_dates = ev.groupby("Fecha").size().reset_index(name="n_events")
+
+        # Etiqueta bonita
+        def _fmt_signed(x):
+            try:
+                x = float(x)
+            except Exception:
+                x = 0.0
+            return f"{x:+.0f}"
+
+        ev["Cambio_txt"] = ev["Cambio"].apply(_fmt_signed)
+        ev["label"] = (
+            ev["Proyecto"].astype(str)
+            + " — "
+            + ev["Tipo_evento"].astype(str)
+            + " ("
+            + ev["Cambio_txt"].astype(str)
+            + ")"
+        )
+
+    # Enriquecer wide con n_events para poder mostrar "Sin eventos"
+    wide2 = wide.copy()
+    # --- asegurar columna n_events SIEMPRE ---
+    wide2["n_events"] = 0
+    
+    if ev_dates is not None and not ev_dates.empty:
+        wide2 = wide2.merge(ev_dates, on="Fecha", how="left")
+        if "n_events" in wide2.columns:
+            wide2["n_events"] = (
+                pd.to_numeric(wide2["n_events"], errors="coerce")
+                .fillna(0)
+                .astype(int)
+            )
+        else:
+            wide2["n_events"] = 0
+
+
+    # ---- long para líneas ----
+    long = wide2.melt(id_vars="Fecha", value_vars=list(cols), var_name="Serie", value_name="Valor")
     long["Valor"] = pd.to_numeric(long["Valor"], errors="coerce").fillna(0)
 
     series_domain = list(cols)
     color_series = alt.Color("Serie:N", scale=alt.Scale(domain=series_domain), legend=None)
+
     nearest = alt.selection_point(nearest=True, on="mouseover", fields=["Fecha"], empty=False)
 
     lines_chart = (
@@ -890,8 +1030,8 @@ def step_line_chart(df: pd.DataFrame, cols, y_title="Piezas", height=260):
         )
     )
 
-    selectors = alt.Chart(wide).mark_point(opacity=0).encode(x="Fecha:T").add_params(nearest)
-    rule = alt.Chart(wide).mark_rule().encode(x="Fecha:T").transform_filter(nearest)
+    selectors = alt.Chart(wide2).mark_point(opacity=0).encode(x="Fecha:T").add_params(nearest)
+    rule = alt.Chart(wide2).mark_rule().encode(x="Fecha:T").transform_filter(nearest)
 
     points = (
         alt.Chart(long)
@@ -907,9 +1047,11 @@ def step_line_chart(df: pd.DataFrame, cols, y_title="Piezas", height=260):
 
     zero_line = alt.Chart(pd.DataFrame({"y": [0]})).mark_rule(strokeWidth=3, color="black").encode(y="y:Q")
 
-    main = alt.layer(lines_chart, selectors, points, rule, zero_line).properties(height=height).interactive()
+    main_layers = [lines_chart, selectors, points, rule, zero_line]
+    main = alt.layer(*main_layers).properties(height=height).interactive()
 
-    panel_h = max(120, int(height) + 40)
+    # ---- Panel detalle (series) ----
+    panel_h = max(140, int(height) + 80)
 
     detail_base = (
         alt.Chart(long)
@@ -935,15 +1077,58 @@ def step_line_chart(df: pd.DataFrame, cols, y_title="Piezas", height=260):
     )
 
     date_header = (
-        alt.Chart(wide)
+        alt.Chart(wide2)
         .transform_filter(nearest)
         .transform_calculate(fecha_txt="timeFormat(datum.Fecha, '%d-%b-%Y')")
         .mark_text(align="left", fontWeight="bold")
         .encode(x=alt.value(0), y=alt.value(18), text="fecha_txt:N")
     )
 
-    panel = alt.layer(date_header, detail_dots, detail_text).properties(width="container", height=panel_h)
-    final = alt.vconcat(main.properties(width="container"), panel).configure_concat(spacing=8)
+    # ---- Panel eventos (proyecto responsable) ----
+    ev_header = alt.Chart(pd.DataFrame({"txt": ["Eventos:"]})).mark_text(
+        align="left", fontWeight="bold"
+    ).encode(
+        x=alt.value(0),
+        y=alt.value(130),  # 👈 baja el título
+        text="txt:N"
+    )
+
+    ev_text = None
+    no_ev_text = None
+
+    if ev is not None and not ev.empty:
+        ev_text = (
+            alt.Chart(ev)
+            .transform_filter(nearest)
+            .transform_window(row="row_number()", sort=[alt.SortField("Tipo_evento", order="ascending")])
+            .transform_calculate(ypos="datum.row * 18 + 150")
+            .mark_text(align="left")
+            .encode(
+                x=alt.value(0),
+                y=alt.Y("ypos:Q", axis=None, scale=alt.Scale(domain=[0, panel_h], range=[0, panel_h])),
+                text="label:N",
+            )
+        )
+    else:
+        # Si no se pasan eventos_df, mostramos una nota suave
+        no_ev_text = (
+            alt.Chart(pd.DataFrame({"txt": ["(sin eventos: activa return_events=True)"]}))
+            .mark_text(align="left", color="#6b7280")
+            .encode(x=alt.value(0), y=alt.value(120), text="txt:N")
+        )
+
+    panel_layers = [date_header, detail_dots, detail_text, ev_header]
+    if no_ev_text is not None:
+        panel_layers.append(no_ev_text)
+    if ev_text is not None:
+        panel_layers.append(ev_text)
+
+    panel = alt.layer(*panel_layers).properties(width="container", height=panel_h)
+
+    final = alt.vconcat(
+        main.properties(width="container"),
+        panel
+    ).configure_concat(spacing=8)
 
     st.altair_chart(final, use_container_width=True)
 
@@ -1060,9 +1245,10 @@ def disponibilidad_tab(stock: pd.DataFrame, proyectos: pd.DataFrame):
 
     # -------- WF
     st.subheader("WF600x2250 – Stock (Nuevo / Usado / Total)")
-    stock_wf, uso_wf, alertas_wf = _simular_pieza(stock_c, obras_c, "WF600x2250")
+    stock_wf, uso_wf, alertas_wf, eventos_wf = _simular_pieza(stock_c, obras_c, "WF600x2250", return_events=True)
+
     if stock_wf is not None and not stock_wf.empty:
-        step_line_chart(stock_wf, ["nuevo", "usado", "total"], y_title="Piezas", height=260)
+        step_line_chart(stock_wf, ["nuevo", "usado", "total"], y_title="Piezas", height=260, eventos_df=eventos_wf)
 
     st.subheader("WF600x2250 – Uso en obra (Arriendos) + Total")
     if uso_wf is not None and not uso_wf.empty:
@@ -1077,9 +1263,10 @@ def disponibilidad_tab(stock: pd.DataFrame, proyectos: pd.DataFrame):
 
     # -------- CE
     st.subheader("CE600x1200 – Stock (Nuevo / Usado / Total)")
-    stock_ce, uso_ce, alertas_ce = _simular_pieza(stock_c, obras_c, "CE600x1200")
+    stock_ce, uso_ce, alertas_ce, eventos_ce = _simular_pieza(stock_c, obras_c, "CE600x1200", return_events=True)
+
     if stock_ce is not None and not stock_ce.empty:
-        step_line_chart(stock_ce, ["nuevo", "usado", "total"], y_title="Piezas", height=260)
+        step_line_chart(stock_ce, ["nuevo", "usado", "total"], y_title="Piezas", height=260, eventos_df=eventos_ce)
 
     st.subheader("CE600x1200 – Uso en obra (Arriendos) + Total")
     if uso_ce is not None and not uso_ce.empty:
@@ -1089,7 +1276,6 @@ def disponibilidad_tab(stock: pd.DataFrame, proyectos: pd.DataFrame):
             st.altair_chart(chart, use_container_width=True)
     else:
         st.info("No hay uso en obra (arriendos) para CE600x1200.")
-
 
 
 # ============================================================
@@ -1102,7 +1288,7 @@ HOY = pd.to_datetime(
     st.sidebar.date_input("Fecha base", value=pd.Timestamp.today())
 )
 
-ritmo_taller = st.sidebar.number_input("Ritmo base Taller", value=70.0)
+ritmo_taller = st.sidebar.number_input("Ritmo base Taller", value=75.0)
 ritmo_lavado = st.sidebar.number_input("Ritmo base Lavado", value=100.0)
 
 autosave = st.sidebar.checkbox("Guardar automáticamente en Excel", value=True)
@@ -1144,8 +1330,15 @@ tabs = st.tabs(["📚 Datos", "🧰 Taller", "🧽 Lavado", "📦 Disponibilidad
 # ================= DATOS =================
 with tabs[0]:
     st.header("Datos")
-
     st.subheader("Proyectos")
+
+    hide_100 = st.checkbox(
+        "Ocultar proyectos al 100%",
+        value=False,
+        key="hide_100_proy"
+    )
+
+    # ✅ 1) DEFINIR proy_cfg PRIMERO
     proy_cfg = {
         "Proyecto": st.column_config.TextColumn("Proyecto", width="medium"),
         "Constructora": st.column_config.TextColumn("Const.", width="small"),
@@ -1155,36 +1348,57 @@ with tabs[0]:
             required=True,
             width="small",
         ),
-        "Fecha_requerida": st.column_config.DateColumn("F. Req", width="small"),
-        "Inicio_obra": st.column_config.DateColumn("Inicio_obra", width="small"),
-        "Duracion_obra_meses": st.column_config.NumberColumn("Duración", width="small"),
-        "Termino_obra": st.column_config.DateColumn("Término_obra", disabled=True, width="small"),
-    
+        "Fecha_requerida": st.column_config.DateColumn(
+            "F. Req", format="DD-MMM-YYYY", width="small"
+        ),
+        "Inicio_obra": st.column_config.DateColumn(
+            "Inicio_obra", format="DD-MMM-YYYY", width="small"
+        ),
+        "Duracion_obra_meses": st.column_config.NumberColumn(
+            "Duración", width="small"
+        ),
+        "Termino_obra": st.column_config.DateColumn(
+            "Término_obra", format="DD-MMM-YYYY", disabled=True, width="small"
+        ),
         "M2": st.column_config.NumberColumn("M2", width="small"),
-        "Avance_pct": st.column_config.NumberColumn("Av %", min_value=0, max_value=100, step=1, width="small"),
-        "Avance_m2": st.column_config.NumberColumn("Av m²", disabled=True, width="small"),
+        "Avance_pct": st.column_config.NumberColumn(
+            "Av %", min_value=0, max_value=100, step=1, width="small"
+        ),
+        "Avance_m2": st.column_config.NumberColumn(
+            "Av m²", disabled=True, width="small"
+        ),
         "Ritmo_esperado": st.column_config.NumberColumn("Ritmo", width="small"),
-    
         "WF600x2250_usado": st.column_config.NumberColumn("WF U", width="small"),
         "WF600x2250_nuevo": st.column_config.NumberColumn("WF N", width="small"),
         "CE600x1200_usado": st.column_config.NumberColumn("CE U", width="small"),
         "CE600x1200_nuevo": st.column_config.NumberColumn("CE N", width="small"),
-    
         "Comentario": st.column_config.TextColumn("Comentario", width="medium"),
     }
 
+    # ✅ 2) LUEGO preparar base y vista
+    df_proy_base = st.session_state["df_proy"].copy()
+    view_proy = df_proy_base.copy()
+
+    av = pd.to_numeric(view_proy.get("Avance_pct"), errors="coerce").fillna(0)
+    if hide_100:
+        view_proy = view_proy[av < 100]
+
+    # ✅ 3) RECIÉN AQUÍ usar proy_cfg
     df_proy = stable_data_editor(
         df_key="df_proy",
         widget_key="editor_proyectos_v2_fix",
         column_config=proy_cfg,
         schema_fn=schema_proyectos_keep_rowid,
-        view_df=st.session_state["df_proy"],
-        height=_df_height(st.session_state["df_proy"]),
+        view_df=view_proy,
+        height=_df_height(view_proy),
         num_rows="dynamic",
     )
-
+    # ---------------- STOCK ----------------
     st.subheader("Stock")
-    stock_cfg = {"Fecha": st.column_config.DateColumn("Fecha")}
+    stock_cfg = {
+        "Fecha": st.column_config.DateColumn("Fecha", format="DD-MMM-YYYY")
+    }
+
     df_stock = stable_data_editor(
         df_key="df_stock",
         widget_key="editor_stock_v2_fix",
@@ -1195,14 +1409,24 @@ with tabs[0]:
         num_rows="dynamic",
     )
 
+    # ---------------- LAVADO ----------------
     st.subheader("Lavado")
     lav_cfg = {
-        "Fecha Requerida": st.column_config.DateColumn("Fecha requerida"),
-        "Inicio": st.column_config.DateColumn("Inicio"),
-        "Termino": st.column_config.DateColumn("Término"),
-        "Inicio_prog": st.column_config.DateColumn("Inicio programado"),
+        "Fecha Requerida": st.column_config.DateColumn(
+            "Fecha requerida", format="DD-MMM-YYYY"
+        ),
+        "Inicio": st.column_config.DateColumn(
+            "Inicio", format="DD-MMM-YYYY"
+        ),
+        "Termino": st.column_config.DateColumn(
+            "Término", format="DD-MMM-YYYY"
+        ),
+        "Inicio_prog": st.column_config.DateColumn(
+            "Inicio programado", format="DD-MMM-YYYY"
+        ),
         "Comentario": st.column_config.TextColumn("Comentario"),
     }
+
     df_lav = stable_data_editor(
         df_key="df_lav",
         widget_key="editor_lavado_v2_fix",
@@ -1213,7 +1437,7 @@ with tabs[0]:
         num_rows="dynamic",
     )
 
-    # Guardado automático (ya con df canónico actualizado a la primera)
+    # ---------------- GUARDADO ----------------
     if autosave:
         save_all_data(
             drop_internal_cols(st.session_state["df_proy"]),
@@ -1233,7 +1457,13 @@ with tabs[1]:
     base["Fecha Requerida"] = base["Fecha_requerida"]
 
     res = programa_linea(base, ritmo_taller, HOY)
-    st.dataframe(res, height=_df_height(res))
+    
+    taller_res_cfg = {
+    "Fecha Requerida": st.column_config.DateColumn("Fecha Requerida", format="DD-MMM-YYYY"),
+    "Inicio prog": st.column_config.DateColumn("Inicio prog", format="DD-MMM-YYYY"),
+    "Fin prog": st.column_config.DateColumn("Fin prog", format="DD-MMM-YYYY"),}
+
+    st.dataframe(res, height=_df_height(res), column_config=taller_res_cfg)
 
     export_block(res, name="Taller calculado", key_prefix="taller_calculado")
 
@@ -1241,19 +1471,26 @@ with tabs[1]:
 # ================= LAVADO =================
 with tabs[2]:
     st.header("Lavado")
-
     df_lav_now = st.session_state["df_lav"].copy()
     res_lav = programa_linea(df_lav_now, ritmo_lavado, HOY)
 
     st.dataframe(res_lav, height=_df_height(res_lav))
 
-    export_block(res_lav, name="Lavado calculado", key_prefix="lavado_calculado")
+    export_block(
+        res_lav,
+        name="Lavado calculado",
+        key_prefix="lavado_calculado"
+    )
 
 # ================= DISPONIBILIDAD =================
 with tabs[3]:
     df_stock_now = st.session_state["df_stock"].copy()
     df_proy_now = st.session_state["df_proy"].copy()
     disponibilidad_tab(df_stock_now, df_proy_now)
+
+
+
+
 
 
 
