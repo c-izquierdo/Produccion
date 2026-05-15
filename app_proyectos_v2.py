@@ -14,6 +14,68 @@ import altair as alt
 import streamlit as st
 import streamlit.components.v1 as components
 
+import requests
+import base64
+
+# --- CONFIG GITHUB ---
+GITHUB_TOKEN = st.secrets["github"]["token"]  # lo pones en secrets.toml
+REPO_OWNER = "c-izquierdo"
+REPO_NAME = "Produccion"
+FILE_PATH_GITHUB = "proyectos_v2.xlsx"  # ruta dentro del repo
+BRANCH = "main"
+
+def load_from_github():
+    url = f"https://api.github.com/repos/{REPO_OWNER}/{REPO_NAME}/contents/{FILE_PATH_GITHUB}"
+    headers = {"Authorization": f"token {GITHUB_TOKEN}"}
+
+    r = requests.get(url, headers=headers)
+
+    if r.status_code == 200:
+        content = base64.b64decode(r.json()["content"])
+
+        temp_path = "temp_load.xlsx"
+        with open(temp_path, "wb") as f:
+            f.write(content)
+
+        return pd.read_excel(temp_path, sheet_name=None)
+
+    return None
+
+def save_to_github(local_file_path):
+    url = f"https://api.github.com/repos/{REPO_OWNER}/{REPO_NAME}/contents/{FILE_PATH_GITHUB}"
+    headers = {"Authorization": f"token {GITHUB_TOKEN}"}
+
+    # 1) Leer archivo local
+    with open(local_file_path, "rb") as f:
+        content = base64.b64encode(f.read()).decode()
+
+    # 2) Obtener SHA del archivo actual (necesario para update)
+    r = requests.get(url, headers=headers)
+    
+    if r.status_code == 200:
+        sha = r.json()["sha"]
+    else:
+        sha = None  # si no existe el archivo
+
+    # 3) Payload
+    data = {
+        "message": "update proyectos desde streamlit",
+        "content": content,
+        "branch": BRANCH
+    }
+
+    if sha:
+        data["sha"] = sha
+
+    # 4) Subir
+    response = requests.put(url, headers=headers, json=data)
+
+    if response.status_code in [200, 201]:
+        return True
+    else:
+        st.error(f"Error subiendo a GitHub: {response.json()}")
+        return False
+
 def check_password():
     def password_entered():
         if st.session_state.get("password") == st.secrets["auth"]["password"]:
@@ -1469,7 +1531,7 @@ with tabs[0]:
             drop_internal_cols(st.session_state["df_stock"]),
             drop_internal_cols(st.session_state["df_lav"]),
         )
-
+        save_to_github(XLSX_PATH)
 
 # ================= TALLER =================
 with tabs[1]:
