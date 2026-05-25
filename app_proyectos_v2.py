@@ -17,6 +17,7 @@ import streamlit.components.v1 as components
 import requests
 import base64
 
+# version deploy 2026-05
 # --- CONFIG GITHUB ---
 GITHUB_TOKEN = st.secrets["github"]["token"]  # lo pones en secrets.toml
 REPO_OWNER = "c-izquierdo"
