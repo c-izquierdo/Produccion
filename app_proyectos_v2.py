@@ -16,6 +16,11 @@ import streamlit.components.v1 as components
 
 import requests
 import base64
+import os
+import tempfile
+import time
+import json
+import hashlib
 
 # version deploy 2026-05
 # --- CONFIG GITHUB ---
@@ -42,40 +47,145 @@ def load_from_github():
 
     return None
 
-def save_to_github(local_file_path):
+def save_to_github(local_file_path, commit_message="update proyectos desde streamlit"):
     url = f"https://api.github.com/repos/{REPO_OWNER}/{REPO_NAME}/contents/{FILE_PATH_GITHUB}"
-    headers = {"Authorization": f"token {GITHUB_TOKEN}"}
-
-    # 1) Leer archivo local
-    with open(local_file_path, "rb") as f:
-        content = base64.b64encode(f.read()).decode()
-
-    # 2) Obtener SHA del archivo actual (necesario para update)
-    r = requests.get(url, headers=headers)
-    
-    if r.status_code == 200:
-        sha = r.json()["sha"]
-    else:
-        sha = None  # si no existe el archivo
-
-    # 3) Payload
-    data = {
-        "message": "update proyectos desde streamlit",
-        "content": content,
-        "branch": BRANCH
+    headers = {
+        "Authorization": f"token {GITHUB_TOKEN}",
+        "Accept": "application/vnd.github+json",
     }
 
+    with open(local_file_path, "rb") as f:
+        content = base64.b64encode(f.read()).decode("utf-8")
+
+    r = requests.get(url, headers=headers, timeout=30)
+    if r.status_code == 200:
+        sha = r.json().get("sha")
+    elif r.status_code == 404:
+        sha = None
+    else:
+        return False, f"No se pudo obtener SHA actual (HTTP {r.status_code}): {r.text}"
+
+    data = {
+        "message": commit_message,
+        "content": content,
+        "branch": BRANCH,
+    }
     if sha:
         data["sha"] = sha
 
-    # 4) Subir
-    response = requests.put(url, headers=headers, json=data)
+    response = requests.put(url, headers=headers, json=data, timeout=30)
+    if response.status_code in (200, 201):
+        new_sha = response.json().get("content", {}).get("sha", "")
+        return True, new_sha
 
-    if response.status_code in [200, 201]:
-        return True
-    else:
-        st.error(f"Error subiendo a GitHub: {response.json()}")
+    return False, f"Error subiendo a GitHub (HTTP {response.status_code}): {response.text}"
+
+
+def notify(message: str, success: bool = True):
+    try:
+        st.toast(message, icon="✅" if success else "❌")
+    except Exception:
+        if success:
+            st.success(message)
+        else:
+            st.error(message)
+
+
+def export_current_state_to_excel(local_file_path: str):
+    proy = normalizar_proyectos(st.session_state["df_proy"].copy())
+    stock = normalizar_stock(st.session_state["df_stock"].copy())
+    lav = normalizar_lavado(st.session_state["df_lav"].copy())
+
+    with pd.ExcelWriter(local_file_path, engine="openpyxl") as writer:
+        drop_internal_cols(proy).to_excel(writer, sheet_name="proyectos", index=False)
+        drop_internal_cols(stock).to_excel(writer, sheet_name="stock_dispo", index=False)
+        drop_internal_cols(lav).to_excel(writer, sheet_name="lavado", index=False)
+
+
+def _df_signature(df: pd.DataFrame) -> str:
+    if df is None:
+        return "none"
+
+    tmp = df.copy()
+    for c in tmp.columns:
+        if pd.api.types.is_datetime64_any_dtype(tmp[c]) or pd.api.types.is_object_dtype(tmp[c]):
+            tmp[c] = tmp[c].astype(str)
+    tmp = tmp.fillna("")
+    payload = tmp.to_json(orient="split", force_ascii=False)
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
+def current_state_signature() -> str:
+    parts = [
+        _df_signature(st.session_state.get("df_proy")),
+        _df_signature(st.session_state.get("df_stock")),
+        _df_signature(st.session_state.get("df_lav")),
+    ]
+    return hashlib.sha256("|".join(parts).encode("utf-8")).hexdigest()
+
+
+def immediate_autosave(reason: str = "cambio"):
+    if not st.session_state.get("autosave_enabled", True):
         return False
+
+    tmp_path = None
+    try:
+        with tempfile.NamedTemporaryFile(delete=False, suffix=".xlsx") as tmp:
+            tmp_path = tmp.name
+        export_current_state_to_excel(tmp_path)
+
+        ok, detail = save_to_github(
+            tmp_path,
+            commit_message=f"{reason}: update automático desde streamlit"
+        )
+
+        if ok:
+            st.session_state["last_saved_signature"] = current_state_signature()
+            st.session_state["last_save_ok"] = True
+            st.session_state["last_save_detail"] = detail
+            st.session_state["last_save_ts"] = time.time()
+            notify("💾 Guardado en GitHub", success=True)
+            return True
+
+        notify(f"⚠️ Error al guardar: {detail}", success=False)
+        st.session_state["last_save_ok"] = False
+        st.session_state["last_save_detail"] = detail
+        return False
+    except Exception as e:
+        notify(f"❌ Error en autosave: {str(e)}", success=False)
+        st.session_state["last_save_ok"] = False
+        st.session_state["last_save_detail"] = str(e)
+        return False
+    finally:
+        if tmp_path and os.path.exists(tmp_path):
+            try:
+                os.remove(tmp_path)
+            except Exception:
+                pass
+
+
+def autosave_if_needed():
+    if not st.session_state.get("autosave_enabled", True):
+        return
+
+    current_sig = current_state_signature()
+    last_sig = st.session_state.get("last_saved_signature")
+    if last_sig is None:
+        st.session_state["last_saved_signature"] = current_sig
+        return
+
+    if current_sig == last_sig:
+        return
+
+    if st.session_state.get("_autosave_lock", False):
+        return
+
+    st.session_state["_autosave_lock"] = True
+    try:
+        immediate_autosave(reason="autosave")
+    finally:
+        st.session_state["_autosave_lock"] = False
+
 
 def check_password():
     def password_entered():
@@ -444,6 +554,9 @@ def _apply_editor_delta(df_key: str, widget_key: str, schema_fn):
     out = base_i.reset_index(drop=True)
     out = schema_fn(out) if schema_fn is not None else ensure_rowid(out)
     st.session_state[df_key] = out
+
+    if edited_rows or deleted_rows or added_rows:
+        immediate_autosave(reason="edición")
 
 
 def stable_data_editor(
@@ -1379,11 +1492,34 @@ HOY = pd.to_datetime(
 ritmo_taller = st.sidebar.number_input("Ritmo base Taller", value=80.0)
 ritmo_lavado = st.sidebar.number_input("Ritmo base Lavado", value=100.0)
 
-autosave = st.sidebar.checkbox("Guardar automáticamente en Excel", value=True)
+autosave = st.sidebar.checkbox("Guardar automáticamente en GitHub", value=True, help="Guarda los cambios automáticamente cada vez que edites los datos")
+st.session_state["autosave_enabled"] = autosave
 
-if st.sidebar.button("💾 Guardar ahora"):
-    save_all_data(st.session_state["df_proy"], st.session_state["df_stock"], st.session_state["df_lav"])
-    st.sidebar.success("Guardado en proyectos_v2.xlsx ✅")
+col1, col2 = st.sidebar.columns([1, 1])
+with col1:
+    if st.sidebar.button("💾 Guardar ahora", use_container_width=True):
+        if immediate_autosave(reason="manual desde botón"):
+            st.sidebar.success("✅ Guardado en GitHub")
+        else:
+            st.sidebar.error("❌ No se pudo guardar en GitHub")
+
+with col2:
+    if st.sidebar.button("🔄 Recargar", use_container_width=True, help="Recarga los datos desde GitHub"):
+        st.experimental_rerun()
+
+if "last_save_ts" in st.session_state:
+    last_save = time.time() - st.session_state["last_save_ts"]
+    if last_save < 60:
+        st.sidebar.caption(f"✅ Guardado hace {int(last_save)}s")
+    elif last_save < 3600:
+        st.sidebar.caption(f"✅ Guardado hace {int(last_save/60)}m")
+    else:
+        st.sidebar.caption(f"✅ Guardado hace {int(last_save/3600)}h")
+
+if st.session_state.get("autosave_enabled", True):
+    st.sidebar.caption("🟢 Autosave habilitado")
+else:
+    st.sidebar.caption("🔴 Autosave deshabilitado")
 
 
 # ============================================================
@@ -1406,6 +1542,8 @@ df_proy = st.session_state["df_proy"]
 df_stock = st.session_state["df_stock"]
 df_lav = st.session_state["df_lav"]
 
+if "last_saved_signature" not in st.session_state:
+    st.session_state["last_saved_signature"] = current_state_signature()
 
 
 # ============================================================
@@ -1525,14 +1663,11 @@ with tabs[0]:
         num_rows="dynamic",
     )
 
-    # ---------------- GUARDADO ----------------
+    # ---------------- ESTADO DE AUTOSAVE ----------------
     if autosave:
-        save_all_data(
-            drop_internal_cols(st.session_state["df_proy"]),
-            drop_internal_cols(st.session_state["df_stock"]),
-            drop_internal_cols(st.session_state["df_lav"]),
-        )
-        save_to_github(XLSX_PATH)
+        st.info("Los cambios se guardan automáticamente en GitHub.")
+    else:
+        st.warning("Autosave deshabilitado. Usa el botón Guardar ahora para sincronizar.")
 
 # ================= TALLER =================
 with tabs[1]:
@@ -1577,8 +1712,8 @@ with tabs[3]:
     disponibilidad_tab(df_stock_now, df_proy_now)
 
 
-
-
+if autosave:
+    autosave_if_needed()
 
 
 
