@@ -4,3 +4,16 @@ __pycache__/
 *.log
 .env
 .DS_Store
+# secretos
+.streamlit/secrets.toml
+
+# archivos temporales
+temp.xlsx
+proyectos_v2_export.xlsx
+
+# excel de datos (controlado por github api)
+proyectos_v2.xlsx
+
+# cache
+__pycache__/
+*.pyc
