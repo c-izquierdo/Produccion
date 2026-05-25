@@ -217,7 +217,7 @@ if not check_password():
 # CONFIG
 # ============================================================
 
-st.set_page_config(page_title="Proyectos V2", layout="wide")
+st.set_page_config(page_title="Proyectos V2", layout="wide", initial_sidebar_state="collapsed")
 st.markdown(
     """
 <style>
