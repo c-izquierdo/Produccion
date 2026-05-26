@@ -1521,6 +1521,171 @@ def disponibilidad_tab(stock: pd.DataFrame, proyectos: pd.DataFrame):
         st.info("No hay uso en obra (arriendos) para CE600x1200.")
 
 
+def alertas_calidad_informacion(df_proy: pd.DataFrame) -> pd.DataFrame:
+    df = drop_internal_cols(df_proy.copy())
+    df_act = df[pd.to_numeric(df.get("Avance_pct"), errors="coerce").fillna(0) < 100].copy()
+
+    if df_act.empty:
+        return pd.DataFrame(columns=["Proyecto", "Alerta", "Detalle", "Severidad"])
+
+    alerta_rows = []
+    for _, row in df_act.iterrows():
+        proyecto = str(row.get("Proyecto", "")).strip()
+        detalle = []
+
+        fecha_req = pd.to_datetime(row.get("Fecha_requerida"), errors="coerce")
+        inicio_obra = pd.to_datetime(row.get("Inicio_obra"), errors="coerce")
+        tipo = str(row.get("Tipo", "")).strip()
+        tipo_norm = tipo.upper()
+        m2 = pd.to_numeric(row.get("M2"), errors="coerce")
+        duracion = pd.to_numeric(row.get("Duracion_obra_meses"), errors="coerce")
+        comentario = str(row.get("Comentario", "")).strip().lower()
+
+        if pd.isna(fecha_req):
+            detalle.append("Falta Fecha_requerida")
+        if pd.isna(inicio_obra):
+            detalle.append("Falta Inicio_obra")
+        if pd.isna(m2) or m2 <= 0:
+            detalle.append("M2 vacío o <= 0")
+        if tipo == "":
+            detalle.append("Falta Tipo")
+        if tipo_norm in {"ARRIENDO", "ARRIENDO MO"} and pd.isna(duracion):
+            detalle.append("Falta Duracion_obra_meses para arriendo")
+        if "estimado" in comentario:
+            detalle.append('Comentario contiene "estimado"')
+
+        moldaje_cols = [
+            "WF600x2250_usado",
+            "WF600x2250_nuevo",
+            "CE600x1200_usado",
+            "CE600x1200_nuevo",
+        ]
+        moldaje_vals = [pd.to_numeric(row.get(c), errors="coerce") for c in moldaje_cols]
+        if all(pd.isna(v) for v in moldaje_vals):
+            detalle.append("Cantidades de moldaje WF / CE no informadas")
+
+        if detalle:
+            alerta_rows.append({
+                "Proyecto": proyecto,
+                "Alerta": "Calidad de información",
+                "Detalle": "; ".join(detalle),
+                "Severidad": "Media",
+            })
+
+    return pd.DataFrame(alerta_rows, columns=["Proyecto", "Alerta", "Detalle", "Severidad"])
+
+
+def alertas_cumplimiento_inicio(df_proy: pd.DataFrame, df_stock: pd.DataFrame) -> pd.DataFrame:
+    df = drop_internal_cols(df_proy.copy())
+    df_act = df[pd.to_numeric(df.get("Avance_pct"), errors="coerce").fillna(0) < 100].copy()
+
+    if df_act.empty:
+        return pd.DataFrame(columns=["Proyecto", "Tipo", "Material", "Fecha inicio", "Déficit (pzas)", "Severidad"])
+
+    obras = _obras_from_proyectos_v2(df_act)
+    stock_c = _clean_stock_dispo_v2(df_stock.copy())
+    alertas = []
+
+    if obras.empty or stock_c.empty:
+        return pd.DataFrame(columns=["Proyecto", "Tipo", "Material", "Fecha inicio", "Déficit (pzas)", "Severidad"])
+
+    tipo_map = obras.set_index("Proyecto")["Tipo"].to_dict()
+
+    for pieza_prefix, material in [("WF600x2250", "WF600x2250"), ("CE600x1200", "CE600x1200")]:
+        stock_out, _, _, eventos = _simular_pieza(stock_c, obras, pieza_prefix, return_events=True)
+        if stock_out is None or stock_out.empty or eventos is None or eventos.empty:
+            continue
+
+        eventos = eventos.copy()
+        eventos["Fecha"] = pd.to_datetime(eventos["Fecha"], errors="coerce").dt.normalize()
+        start_events = eventos[eventos["Tipo_evento"].isin(["Inicio obra (Arriendo)", "Venta"])].copy()
+        if start_events.empty:
+            continue
+
+        start_events = start_events.reset_index(drop=True)
+        start_events["demanda_usado"] = -start_events["usado"].fillna(0)
+        start_events["demanda_nuevo"] = -start_events["nuevo"].fillna(0)
+
+        for fecha, grupo in start_events.groupby("Fecha", sort=True):
+            if fecha not in stock_out.index:
+                continue
+
+            final_usado = float(stock_out.loc[fecha, "usado"])
+            final_nuevo = float(stock_out.loc[fecha, "nuevo"])
+            total_demand_usado = float(grupo["demanda_usado"].sum())
+            total_demand_nuevo = float(grupo["demanda_nuevo"].sum())
+
+            before_any_start_usado = final_usado + total_demand_usado
+            before_any_start_nuevo = final_nuevo + total_demand_nuevo
+            running_usado = 0.0
+            running_nuevo = 0.0
+
+            for _, ev in grupo.iterrows():
+                proyecto = str(ev.get("Proyecto", "")).strip()
+                tipo = tipo_map.get(proyecto, "").upper()
+                fecha_inicio = ev["Fecha"]
+
+                if tipo not in {"VENTA", "ARRIENDO"}:
+                    running_usado += float(ev["demanda_usado"])
+                    running_nuevo += float(ev["demanda_nuevo"])
+                    continue
+
+                obra = obras[obras["Proyecto"] == proyecto]
+                if obra.empty:
+                    running_usado += float(ev["demanda_usado"])
+                    running_nuevo += float(ev["demanda_nuevo"])
+                    continue
+
+                obra = obra.iloc[0]
+                req_usado = pd.to_numeric(obra.get(f"{pieza_prefix}_usado"), errors="coerce")
+                req_nuevo = pd.to_numeric(obra.get(f"{pieza_prefix}_nuevo"), errors="coerce")
+                req_usado = float(req_usado if not pd.isna(req_usado) else 0.0)
+                req_nuevo = float(req_nuevo if not pd.isna(req_nuevo) else 0.0)
+
+                if tipo == "VENTA":
+                    req = req_nuevo
+                    available = before_any_start_nuevo - running_nuevo
+                else:
+                    req = req_usado + req_nuevo
+                    available = before_any_start_usado - running_usado
+
+                if req > 0 and available < req:
+                    alertas.append({
+                        "Proyecto": proyecto,
+                        "Tipo": tipo,
+                        "Material": material,
+                        "Fecha inicio": fecha_inicio.date() if pd.notna(fecha_inicio) else "",
+                        "Déficit (pzas)": round(req - max(available, 0.0), 2),
+                        "Severidad": "Alta",
+                    })
+
+                running_usado += float(ev["demanda_usado"])
+                running_nuevo += float(ev["demanda_nuevo"])
+
+    return pd.DataFrame(alertas, columns=["Proyecto", "Tipo", "Material", "Fecha inicio", "Déficit (pzas)", "Severidad"])
+
+
+def alertas_tab(df_proy: pd.DataFrame, df_stock: pd.DataFrame):
+    st.header("🚨 Alertas Operativas")
+
+    st.subheader("🟡 Calidad de la información")
+    calidad = alertas_calidad_informacion(df_proy)
+    if calidad.empty:
+        st.success("✅ Todos los proyectos tienen información mínima completa.")
+    else:
+        st.warning("Existen proyectos con alertas de calidad de información.")
+        st.dataframe(calidad)
+
+    st.divider()
+    st.subheader("🔴 Cumplimiento para inicio de proyectos")
+    cumplimiento = alertas_cumplimiento_inicio(df_proy, df_stock)
+    if cumplimiento.empty:
+        st.success("✅ Todos los proyectos pueden comenzar según stock disponible.")
+    else:
+        st.error("Existen proyectos con déficit de stock para iniciar.")
+        st.dataframe(cumplimiento)
+
+
 # ============================================================
 # SIDEBAR
 # ============================================================
@@ -1592,7 +1757,7 @@ if "last_saved_signature" not in st.session_state:
 # TABS
 # ============================================================
 
-tabs = st.tabs(["📚 Datos", "🧰 Taller", "🧽 Lavado", "📦 Disponibilidad"])
+tabs = st.tabs(["📚 Datos", "🧰 Taller", "🧽 Lavado", "📦 Disponibilidad", "🚨 Alertas"])
 
 
 # ================= DATOS =================
@@ -1752,6 +1917,11 @@ with tabs[3]:
     df_stock_now = st.session_state["df_stock"].copy()
     df_proy_now = st.session_state["df_proy"].copy()
     disponibilidad_tab(df_stock_now, df_proy_now)
+
+
+# ================= ALERTAS =================
+with tabs[4]:
+    alertas_tab(st.session_state["df_proy"], st.session_state["df_stock"])
 
 
 if autosave:
