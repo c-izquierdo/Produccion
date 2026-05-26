@@ -254,9 +254,75 @@ body:has(section[data-testid="stSidebar"][aria-expanded="true"])
   width: calc(100% - var(--sidebar-open-w)) !important;
   padding-left: 1rem;
 }
+
+/* -------------------------- */
+/* Ocultar sidebar por defecto */
+section[data-testid="stSidebar"]{
+    transform: translateX(calc(-1 * var(--sidebar-open-w))) !important;
+    transition: transform .28s ease-in-out !important;
+}
+section[data-testid="stSidebar"][aria-expanded="true"]{
+    transform: translateX(0) !important;
+}
+
+/* Botón toggle fijo */
+.st_toggle_sidebar_btn{
+    position: fixed;
+    top: 0.75rem;
+    left: 0.75rem;
+    z-index: 11000;
+    background: #ffffffcc;
+    border: 1px solid #ddd;
+    border-radius: 8px;
+    padding: 0.35rem 0.55rem;
+    cursor: pointer;
+    box-shadow: 0 1px 4px rgba(0,0,0,0.08);
+}
 </style>
 """,
     unsafe_allow_html=True
+)
+
+# Botón HTML/JS para alternar el sidebar (inicialmente escondido)
+components.html(
+        """
+        <div>
+            <button class="st_toggle_sidebar_btn" id="st_toggle_sidebar">☰</button>
+        </div>
+        <script>
+            function ensureSidebar(){
+                return document.querySelector('section[data-testid="stSidebar"]');
+            }
+
+            function setSidebarState(exp){
+                const s = ensureSidebar();
+                if(!s) return;
+                s.setAttribute('aria-expanded', exp ? 'true' : 'false');
+            }
+
+            // Intentar establecer oculto al inicio (reintentar si no existe aún)
+            (function init(){
+                let tries = 0;
+                const t = setInterval(()=>{
+                    const s = ensureSidebar();
+                    tries += 1;
+                    if(s){
+                        setSidebarState(false);
+                        clearInterval(t);
+                    }
+                    if(tries>30) clearInterval(t);
+                }, 100);
+            })();
+
+            document.getElementById('st_toggle_sidebar').addEventListener('click', ()=>{
+                const s = ensureSidebar();
+                if(!s) return;
+                const isOpen = s.getAttribute('aria-expanded') === 'true';
+                setSidebarState(!isOpen);
+            });
+        </script>
+        """,
+        height=60,
 )
 
 # ------------------------------
