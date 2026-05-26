@@ -22,6 +22,8 @@ import time
 import json
 import hashlib
 
+st.set_page_config(page_title="Proyectos V2", layout="wide", initial_sidebar_state="collapsed")
+
 # version deploy 2026-05
 # --- CONFIG GITHUB ---
 GITHUB_TOKEN = st.secrets["github"]["token"]  # lo pones en secrets.toml
@@ -217,7 +219,6 @@ if not check_password():
 # CONFIG
 # ============================================================
 
-st.set_page_config(page_title="Proyectos V2", layout="wide", initial_sidebar_state="collapsed")
 st.markdown(
     """
 <style>
