@@ -18,10 +18,19 @@ import os
 import tempfile
 import time
 import hashlib
+import base64
+import requests
 
 st.set_page_config(page_title="Proyectos V2", layout="wide", initial_sidebar_state="collapsed")
 
-# version deploy 2026-05
+# ============================================================
+# CONFIG GITHUB
+# ============================================================
+GITHUB_TOKEN = st.secrets["github"]["token"]   # ya lo tienes creado
+REPO_OWNER = "c-izquierdo"
+REPO_NAME = "Produccion"
+FILE_PATH_GITHUB = "proyectos_v2.xlsx"         # porque el Excel está en la misma carpeta del repo
+BRANCH = "main"
 
 def notify(message: str, success: bool = True):
     try:
@@ -34,9 +43,6 @@ def notify(message: str, success: bool = True):
 
 
 def save_to_github(local_file_path, commit_message="update desde streamlit"):
-    import base64
-    import requests
-
     url = f"https://api.github.com/repos/{REPO_OWNER}/{REPO_NAME}/contents/{FILE_PATH_GITHUB}"
 
     headers = {
@@ -44,13 +50,15 @@ def save_to_github(local_file_path, commit_message="update desde streamlit"):
         "Accept": "application/vnd.github+json",
     }
 
-    # Obtener SHA actual
+    # Obtener SHA actual del archivo en GitHub
     r = requests.get(url, headers=headers)
 
     if r.status_code == 200:
         sha = r.json()["sha"]
-    else:
+    elif r.status_code == 404:
         sha = None
+    else:
+        raise Exception(f"Error consultando archivo en GitHub: {r.text}")
 
     # Leer archivo local
     with open(local_file_path, "rb") as f:
@@ -350,19 +358,24 @@ def save_all_data(proy, stock, lav):
         stock_to_save = drop_internal_cols(stock_to_save)
         lav_to_save = drop_internal_cols(lav_to_save)
 
-        # Guardar temporal local
+        # Guardar Excel local temporal
         with pd.ExcelWriter(XLSX_PATH, engine="openpyxl", mode="w") as writer:
             proy_to_save.to_excel(writer, sheet_name="proyectos", index=False)
             stock_to_save.to_excel(writer, sheet_name="stock_dispo", index=False)
             lav_to_save.to_excel(writer, sheet_name="lavado", index=False)
 
-        # 🔥 ESTE ES EL CAMBIO IMPORTANTE
-        save_to_github(str(XLSX_PATH))
+        # Subir el archivo a GitHub
+        save_to_github(str(XLSX_PATH), commit_message="Actualización de datos desde Streamlit")
 
         st.session_state["last_save_ts"] = time.time()
+        st.session_state["last_save_ok"] = True
+        st.session_state["last_save_detail"] = "Guardado en GitHub"
+
         return True, "Guardado en GitHub"
 
     except Exception as e:
+        st.session_state["last_save_ok"] = False
+        st.session_state["last_save_detail"] = str(e)
         return False, str(e)
 
 
