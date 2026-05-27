@@ -14,74 +14,14 @@ import altair as alt
 import streamlit as st
 import streamlit.components.v1 as components
 
-import requests
-import base64
 import os
 import tempfile
 import time
-import json
 import hashlib
 
 st.set_page_config(page_title="Proyectos V2", layout="wide", initial_sidebar_state="collapsed")
 
 # version deploy 2026-05
-# --- CONFIG GITHUB ---
-GITHUB_TOKEN = st.secrets["github"]["token"]  # lo pones en secrets.toml
-REPO_OWNER = "c-izquierdo"
-REPO_NAME = "Produccion"
-FILE_PATH_GITHUB = "proyectos_v2.xlsx"  # ruta dentro del repo
-BRANCH = "main"
-
-def load_from_github():
-    url = f"https://api.github.com/repos/{REPO_OWNER}/{REPO_NAME}/contents/{FILE_PATH_GITHUB}"
-    headers = {"Authorization": f"token {GITHUB_TOKEN}"}
-
-    r = requests.get(url, headers=headers)
-
-    if r.status_code == 200:
-        content = base64.b64decode(r.json()["content"])
-
-        temp_path = "temp_load.xlsx"
-        with open(temp_path, "wb") as f:
-            f.write(content)
-
-        return pd.read_excel(temp_path, sheet_name=None)
-
-    return None
-
-def save_to_github(local_file_path, commit_message="update proyectos desde streamlit"):
-    url = f"https://api.github.com/repos/{REPO_OWNER}/{REPO_NAME}/contents/{FILE_PATH_GITHUB}"
-    headers = {
-        "Authorization": f"token {GITHUB_TOKEN}",
-        "Accept": "application/vnd.github+json",
-    }
-
-    with open(local_file_path, "rb") as f:
-        content = base64.b64encode(f.read()).decode("utf-8")
-
-    r = requests.get(url, headers=headers, timeout=30)
-    if r.status_code == 200:
-        sha = r.json().get("sha")
-    elif r.status_code == 404:
-        sha = None
-    else:
-        return False, f"No se pudo obtener SHA actual (HTTP {r.status_code}): {r.text}"
-
-    data = {
-        "message": commit_message,
-        "content": content,
-        "branch": BRANCH,
-    }
-    if sha:
-        data["sha"] = sha
-
-    response = requests.put(url, headers=headers, json=data, timeout=30)
-    if response.status_code in (200, 201):
-        new_sha = response.json().get("content", {}).get("sha", "")
-        return True, new_sha
-
-    return False, f"Error subiendo a GitHub (HTTP {response.status_code}): {response.text}"
-
 
 def notify(message: str, success: bool = True):
     try:
@@ -127,43 +67,23 @@ def current_state_signature() -> str:
 
 
 def immediate_autosave(reason: str = "cambio"):
-    if not st.session_state.get("autosave_enabled", True):
-        return False
-
-    tmp_path = None
-    try:
-        with tempfile.NamedTemporaryFile(delete=False, suffix=".xlsx") as tmp:
-            tmp_path = tmp.name
-        export_current_state_to_excel(tmp_path)
-
-        ok, detail = save_to_github(
-            tmp_path,
-            commit_message=f"{reason}: update automático desde streamlit"
-        )
-
-        if ok:
-            st.session_state["last_saved_signature"] = current_state_signature()
-            st.session_state["last_save_ok"] = True
-            st.session_state["last_save_detail"] = detail
-            st.session_state["last_save_ts"] = time.time()
-            notify("💾 Guardado en GitHub", success=True)
-            return True
-
-        notify(f"⚠️ Error al guardar: {detail}", success=False)
+    local_ok, local_detail = save_all_data(
+        st.session_state.get("df_proy", pd.DataFrame()),
+        st.session_state.get("df_stock", pd.DataFrame()),
+        st.session_state.get("df_lav", pd.DataFrame()),
+    )
+    if not local_ok:
         st.session_state["last_save_ok"] = False
-        st.session_state["last_save_detail"] = detail
+        st.session_state["last_save_detail"] = local_detail
+        notify(f"❌ {local_detail}", success=False)
         return False
-    except Exception as e:
-        notify(f"❌ Error en autosave: {str(e)}", success=False)
-        st.session_state["last_save_ok"] = False
-        st.session_state["last_save_detail"] = str(e)
-        return False
-    finally:
-        if tmp_path and os.path.exists(tmp_path):
-            try:
-                os.remove(tmp_path)
-            except Exception:
-                pass
+
+    st.session_state["last_saved_signature"] = current_state_signature()
+    st.session_state["last_save_ok"] = True
+    st.session_state["last_save_ts"] = time.time()
+    st.session_state["last_save_detail"] = local_detail
+    notify("💾 Guardado local en proyectos_v2.xlsx", success=True)
+    return True
 
 
 def autosave_if_needed():
@@ -389,11 +309,18 @@ def save_all_data(proy, stock, lav):
 
     try:
         with pd.ExcelWriter(XLSX_PATH, engine="openpyxl", mode="w") as writer:
-            proy_to_save.to_excel(writer, sheet_name="proyectos", index=False)
-            stock_to_save.to_excel(writer, sheet_name="stock_dispo", index=False)
-            lav_to_save.to_excel(writer, sheet_name="lavado", index=False)
+            drop_internal_cols(proy_to_save).to_excel(writer, sheet_name="proyectos", index=False)
+            drop_internal_cols(stock_to_save).to_excel(writer, sheet_name="stock_dispo", index=False)
+            drop_internal_cols(lav_to_save).to_excel(writer, sheet_name="lavado", index=False)
+        return True, f"Guardado local en {XLSX_PATH}"
     except PermissionError:
-        st.error("No pude guardar el Excel. Probablemente está abierto. Ciérralo y vuelve a intentar.")
+        msg = "No pude guardar el Excel. Probablemente está abierto. Ciérralo y vuelve a intentar."
+        st.error(msg)
+        return False, msg
+    except Exception as exc:
+        msg = f"Error guardando localmente: {exc}"
+        st.error(msg)
+        return False, msg
 
 def df_to_markdown_safe(df: pd.DataFrame, index: bool = False) -> str:
     """Convierte DataFrame a markdown sin fallar si falta 'tabulate'."""
@@ -1699,19 +1626,20 @@ HOY = pd.to_datetime(
 ritmo_taller = st.sidebar.number_input("Ritmo base Taller", value=80.0)
 ritmo_lavado = st.sidebar.number_input("Ritmo base Lavado", value=100.0)
 
-autosave = st.sidebar.checkbox("Guardar automáticamente en GitHub", value=True, help="Guarda los cambios automáticamente cada vez que edites los datos")
+autosave = st.sidebar.checkbox("Guardar automáticamente local", value=True, help="Guarda los cambios automáticamente en el archivo local proyectos_v2.xlsx")
 st.session_state["autosave_enabled"] = autosave
 
 col1, col2 = st.sidebar.columns([1, 1])
 with col1:
     if st.sidebar.button("💾 Guardar ahora", use_container_width=True):
-        if immediate_autosave(reason="manual desde botón"):
-            st.sidebar.success("✅ Guardado en GitHub")
+        ok = immediate_autosave(reason="manual desde botón")
+        if ok:
+            st.sidebar.success("✅ Guardado local en proyectos_v2.xlsx")
         else:
-            st.sidebar.error("❌ No se pudo guardar en GitHub")
+            st.sidebar.error(f"❌ Error al guardar: {st.session_state.get('last_save_detail', 'Sin detalle')}")
 
 with col2:
-    if st.sidebar.button("🔄 Recargar", use_container_width=True, help="Recarga los datos desde GitHub"):
+    if st.sidebar.button("🔄 Recargar", use_container_width=True, help="Recarga los datos desde el archivo local y refresca la vista"):
         st.experimental_rerun()
 
 if "last_save_ts" in st.session_state:
@@ -1872,9 +1800,9 @@ with tabs[0]:
 
     # ---------------- ESTADO DE AUTOSAVE ----------------
     if autosave:
-        st.info("Los cambios se guardan automáticamente en GitHub.")
+        st.info("Los cambios se guardan automáticamente en el archivo local proyectos_v2.xlsx.")
     else:
-        st.warning("Autosave deshabilitado. Usa el botón Guardar ahora para sincronizar.")
+        st.warning("Autosave deshabilitado. Usa el botón Guardar ahora para guardar los cambios.")
 
 # ================= TALLER =================
 with tabs[1]:
