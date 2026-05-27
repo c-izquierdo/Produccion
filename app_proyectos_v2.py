@@ -33,6 +33,45 @@ def notify(message: str, success: bool = True):
             st.error(message)
 
 
+def save_to_github(local_file_path, commit_message="update desde streamlit"):
+    import base64
+    import requests
+
+    url = f"https://api.github.com/repos/{REPO_OWNER}/{REPO_NAME}/contents/{FILE_PATH_GITHUB}"
+
+    headers = {
+        "Authorization": f"token {GITHUB_TOKEN}",
+        "Accept": "application/vnd.github+json",
+    }
+
+    # Obtener SHA actual
+    r = requests.get(url, headers=headers)
+
+    if r.status_code == 200:
+        sha = r.json()["sha"]
+    else:
+        sha = None
+
+    # Leer archivo local
+    with open(local_file_path, "rb") as f:
+        content = base64.b64encode(f.read()).decode("utf-8")
+
+    data = {
+        "message": commit_message,
+        "content": content,
+        "branch": BRANCH,
+    }
+
+    if sha:
+        data["sha"] = sha
+
+    r = requests.put(url, headers=headers, json=data)
+
+    if r.status_code not in [200, 201]:
+        raise Exception(f"Error al guardar en GitHub: {r.text}")
+
+    return True
+
 def export_current_state_to_excel(local_file_path: str):
     proy = normalizar_proyectos(st.session_state["df_proy"].copy())
     stock = normalizar_stock(st.session_state["df_stock"].copy())
@@ -67,41 +106,43 @@ def current_state_signature() -> str:
 
 
 def immediate_autosave(reason: str = "cambio"):
-    local_ok, local_detail = save_all_data(
+    ok, detail = save_all_data(
         st.session_state.get("df_proy", pd.DataFrame()),
         st.session_state.get("df_stock", pd.DataFrame()),
         st.session_state.get("df_lav", pd.DataFrame()),
     )
-    if not local_ok:
-        st.session_state["last_save_ok"] = False
-        st.session_state["last_save_detail"] = local_detail
-        notify(f"❌ {local_detail}", success=False)
-        return False
 
-    st.session_state["last_saved_signature"] = current_state_signature()
-    st.session_state["last_save_ok"] = True
-    st.session_state["last_save_ts"] = time.time()
-    st.session_state["last_save_detail"] = local_detail
-    notify("💾 Guardado local en proyectos_v2.xlsx", success=True)
-    return True
+    if ok:
+        notify("✅ Guardado en GitHub")
+        return True
+    else:
+        notify(f"❌ {detail}", success=False)
+        return False
 
 
 def autosave_if_needed():
+    print(f"[AUTOSAVE_IF_NEEDED] autosave_enabled: {st.session_state.get('autosave_enabled', True)}")
     if not st.session_state.get("autosave_enabled", True):
+        print("[AUTOSAVE_IF_NEEDED] autosave deshabilitado, retornando")
         return
 
     current_sig = current_state_signature()
     last_sig = st.session_state.get("last_saved_signature")
+    print(f"[AUTOSAVE_IF_NEEDED] current_sig: {current_sig[:8]}... last_sig: {last_sig[:8] if last_sig else 'None'}...")
     if last_sig is None:
         st.session_state["last_saved_signature"] = current_sig
+        print("[AUTOSAVE_IF_NEEDED] primera vez, guardando signature")
         return
 
     if current_sig == last_sig:
+        print("[AUTOSAVE_IF_NEEDED] sin cambios")
         return
 
     if st.session_state.get("_autosave_lock", False):
+        print("[AUTOSAVE_IF_NEEDED] lock activo, saltando")
         return
 
+    print("[AUTOSAVE_IF_NEEDED] ejecutando immediate_autosave")
     st.session_state["_autosave_lock"] = True
     try:
         immediate_autosave(reason="autosave")
@@ -300,40 +341,30 @@ def load_all_data():
 
 
 def save_all_data(proy, stock, lav):
-    proy_to_save = normalizar_proyectos(proy.copy())
-
-    stock_to_save = stock.copy()
-    if "Fecha" in stock_to_save.columns:
-        stock_to_save["Fecha"] = pd.to_datetime(stock_to_save["Fecha"], errors="coerce").dt.date
-
-    lav_to_save = lav.copy()
-    if "Fecha Requerida" in lav_to_save.columns:
-        lav_to_save["Fecha Requerida"] = pd.to_datetime(lav_to_save["Fecha Requerida"], errors="coerce").dt.date
-    if "Inicio_prog" in lav_to_save.columns:
-        lav_to_save["Inicio_prog"] = pd.to_datetime(lav_to_save["Inicio_prog"], errors="coerce").dt.date
-
     try:
-        # Debug: mostrar ruta completa
-        print(f"[SAVE] XLSX_PATH absoluto: {XLSX_PATH.resolve()}")
-        print(f"[SAVE] XLSX_PATH existe: {XLSX_PATH.exists()}")
-        
+        proy_to_save = normalizar_proyectos(proy.copy())
+        stock_to_save = normalizar_stock(stock.copy())
+        lav_to_save = normalizar_lavado(lav.copy())
+
+        proy_to_save = drop_internal_cols(proy_to_save)
+        stock_to_save = drop_internal_cols(stock_to_save)
+        lav_to_save = drop_internal_cols(lav_to_save)
+
+        # Guardar temporal local
         with pd.ExcelWriter(XLSX_PATH, engine="openpyxl", mode="w") as writer:
-            drop_internal_cols(proy_to_save).to_excel(writer, sheet_name="proyectos", index=False)
-            drop_internal_cols(stock_to_save).to_excel(writer, sheet_name="stock_dispo", index=False)
-            drop_internal_cols(lav_to_save).to_excel(writer, sheet_name="lavado", index=False)
-        
-        print(f"[SAVE] Guardado exitoso en {XLSX_PATH.resolve()}")
-        return True, f"Guardado local en {XLSX_PATH}"
-    except PermissionError:
-        msg = "No pude guardar el Excel. Probablemente está abierto. Ciérralo y vuelve a intentar."
-        print(f"[SAVE ERROR] PermissionError: {msg}")
-        st.error(msg)
-        return False, msg
-    except Exception as exc:
-        msg = f"Error guardando localmente: {exc}"
-        print(f"[SAVE ERROR] {msg}")
-        st.error(msg)
-        return False, msg
+            proy_to_save.to_excel(writer, sheet_name="proyectos", index=False)
+            stock_to_save.to_excel(writer, sheet_name="stock_dispo", index=False)
+            lav_to_save.to_excel(writer, sheet_name="lavado", index=False)
+
+        # 🔥 ESTE ES EL CAMBIO IMPORTANTE
+        save_to_github(str(XLSX_PATH))
+
+        st.session_state["last_save_ts"] = time.time()
+        return True, "Guardado en GitHub"
+
+    except Exception as e:
+        return False, str(e)
+
 
 def df_to_markdown_safe(df: pd.DataFrame, index: bool = False) -> str:
     """Convierte DataFrame a markdown sin fallar si falta 'tabulate'."""
@@ -1866,7 +1897,7 @@ with tabs[4]:
 
 
 if autosave:
-    autosave_if_needed()
+    immediate_autosave("autosave")
 
 
 
