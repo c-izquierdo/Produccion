@@ -223,9 +223,13 @@ components.html(
 
 # ------------------------------
 
-BASE_DIR = Path(__file__).resolve().parent
+BASE_DIR = Path(os.path.dirname(os.path.abspath(__file__)))
 XLSX_PATH = BASE_DIR / "proyectos_v2.xlsx"
 OLD_XLSX = BASE_DIR / "proyectos.xlsx"
+
+print(f"[INIT] BASE_DIR: {BASE_DIR}")
+print(f"[INIT] XLSX_PATH: {XLSX_PATH}")
+print(f"[INIT] XLSX exists: {XLSX_PATH.exists()}")
 
 ROWID_COL = "__rowid"
 
@@ -309,17 +313,25 @@ def save_all_data(proy, stock, lav):
         lav_to_save["Inicio_prog"] = pd.to_datetime(lav_to_save["Inicio_prog"], errors="coerce").dt.date
 
     try:
+        # Debug: mostrar ruta completa
+        print(f"[SAVE] XLSX_PATH absoluto: {XLSX_PATH.resolve()}")
+        print(f"[SAVE] XLSX_PATH existe: {XLSX_PATH.exists()}")
+        
         with pd.ExcelWriter(XLSX_PATH, engine="openpyxl", mode="w") as writer:
             drop_internal_cols(proy_to_save).to_excel(writer, sheet_name="proyectos", index=False)
             drop_internal_cols(stock_to_save).to_excel(writer, sheet_name="stock_dispo", index=False)
             drop_internal_cols(lav_to_save).to_excel(writer, sheet_name="lavado", index=False)
+        
+        print(f"[SAVE] Guardado exitoso en {XLSX_PATH.resolve()}")
         return True, f"Guardado local en {XLSX_PATH}"
     except PermissionError:
         msg = "No pude guardar el Excel. Probablemente está abierto. Ciérralo y vuelve a intentar."
+        print(f"[SAVE ERROR] PermissionError: {msg}")
         st.error(msg)
         return False, msg
     except Exception as exc:
         msg = f"Error guardando localmente: {exc}"
+        print(f"[SAVE ERROR] {msg}")
         st.error(msg)
         return False, msg
 
