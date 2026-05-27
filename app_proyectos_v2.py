@@ -223,8 +223,9 @@ components.html(
 
 # ------------------------------
 
-XLSX_PATH = Path("proyectos_v2.xlsx")
-OLD_XLSX = Path("proyectos.xlsx")
+BASE_DIR = Path(__file__).resolve().parent
+XLSX_PATH = BASE_DIR / "proyectos_v2.xlsx"
+OLD_XLSX = BASE_DIR / "proyectos.xlsx"
 
 ROWID_COL = "__rowid"
 
