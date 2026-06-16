@@ -1866,15 +1866,15 @@ with tabs[1]:
     st.header("Taller")
     df_proy_now = drop_internal_cols(st.session_state["df_proy"]).copy()
 
-    show_100_taller = st.checkbox(
-        "Mostrar solo proyectos terminados (100%)",
+    hide_100_taller = st.checkbox(
+        "Ocultar proyectos terminados (100%)",
         value=False,
-        key="show_100_taller"
+        key="hide_100_taller_taller"
     )
 
     base = df_proy_now.copy()
-    if show_100_taller:
-        base = base[pd.to_numeric(base.get("Avance_pct"), errors="coerce").fillna(0) == 100]
+    if hide_100_taller:
+        base = base[pd.to_numeric(base.get("Avance_pct"), errors="coerce").fillna(0) < 100]
 
     base["Avance"] = base["Avance_pct"]
     base["Ritmo"] = base["Ritmo_esperado"]
