@@ -14,6 +14,10 @@ import altair as alt
 import streamlit as st
 import streamlit.components.v1 as components
 
+# Altair may reject charts with more than 5000 rows by default.
+# Disable the row limit globally so Streamlit can render larger availability datasets.
+alt.data_transformers.disable_max_rows()
+
 import os
 import tempfile
 import time
@@ -1245,7 +1249,7 @@ def step_line_chart(df: pd.DataFrame, cols, y_title="Piezas", height=260, evento
     series_domain = list(cols)
     color_series = alt.Color("Serie:N", scale=alt.Scale(domain=series_domain), legend=None)
 
-    nearest = alt.selection_point(nearest=True, on="mouseover", fields=["Fecha"], empty=False)
+    nearest = alt.selection_point(name=f"nearest_{uuid.uuid4().hex}", nearest=True, on="mouseover", fields=["Fecha"], empty=False)
 
     lines_chart = (
         alt.Chart(long)
@@ -1257,7 +1261,7 @@ def step_line_chart(df: pd.DataFrame, cols, y_title="Piezas", height=260, evento
         )
     )
 
-    selectors = alt.Chart(wide2).mark_point(opacity=0).encode(x="Fecha:T").add_params(nearest)
+    selectors = alt.Chart(wide2).mark_point(opacity=0).encode(x="Fecha:T")
     rule = alt.Chart(wide2).mark_rule().encode(x="Fecha:T").transform_filter(nearest)
 
     points = (
@@ -1275,7 +1279,7 @@ def step_line_chart(df: pd.DataFrame, cols, y_title="Piezas", height=260, evento
     zero_line = alt.Chart(pd.DataFrame({"y": [0]})).mark_rule(strokeWidth=3, color="black").encode(y="y:Q")
 
     main_layers = [lines_chart, selectors, points, rule, zero_line]
-    main = alt.layer(*main_layers).properties(height=height).interactive()
+    main = alt.layer(*main_layers).add_params(nearest).properties(height=height).interactive()
 
     # ---- Panel detalle (series) ----
     panel_h = max(140, int(height) + 80)
@@ -1358,6 +1362,7 @@ def step_line_chart(df: pd.DataFrame, cols, y_title="Piezas", height=260, evento
     ).configure_concat(spacing=8)
 
     st.altair_chart(final, use_container_width=True)
+    return final
 
 
 def uso_en_obra_chart(uso_wide: pd.DataFrame, *, title: str, height: int = 280):
@@ -1383,7 +1388,7 @@ def uso_en_obra_chart(uso_wide: pd.DataFrame, *, title: str, height: int = 280):
     long = df.melt(id_vars=["Fecha"], value_vars=proj_cols, var_name="Proyecto", value_name="piezas")
     long["piezas"] = pd.to_numeric(long["piezas"], errors="coerce").fillna(0)
 
-    nearest = alt.selection_point(nearest=True, on="mouseover", fields=["Fecha"], empty=False)
+    nearest = alt.selection_point(name=f"nearest_{uuid.uuid4().hex}", nearest=True, on="mouseover", fields=["Fecha"], empty=False)
 
     proj_domain = sorted(long["Proyecto"].unique()) if not long.empty else []
     color_proj = alt.Color("Proyecto:N", title="Obra", scale=alt.Scale(domain=proj_domain))
@@ -1404,10 +1409,10 @@ def uso_en_obra_chart(uso_wide: pd.DataFrame, *, title: str, height: int = 280):
         .encode(x="Fecha:T", y=alt.Y("Total:Q", title="Piezas"))
     )
 
-    selectors = alt.Chart(df).mark_point(opacity=0).encode(x="Fecha:T").add_params(nearest)
+    selectors = alt.Chart(df).mark_point(opacity=0).encode(x="Fecha:T")
     rule = alt.Chart(df).mark_rule().encode(x="Fecha:T").transform_filter(nearest)
 
-    main = alt.layer(area, total_line, selectors, rule).properties(height=height).interactive()
+    main = alt.layer(area, total_line, selectors, rule).add_params(nearest).properties(height=height).interactive()
 
     panel_h = max(120, int(height) + 40)
 
@@ -1470,12 +1475,21 @@ def disponibilidad_tab(stock: pd.DataFrame, proyectos: pd.DataFrame):
     stock_c = _clean_stock_dispo_v2(stock)
     obras_c = _obras_from_proyectos_v2(proyectos)
 
+    # --- DIAGNÓSTICO RÁPIDO (temporal) ---
+    with st.expander("Diagnóstico (mostrar shapes y muestras)"):
+        st.write("stock_c.shape:", getattr(stock_c, 'shape', None))
+        st.write(stock_c.head(5))
+        st.write("obras_c.shape:", getattr(obras_c, 'shape', None))
+        st.write(obras_c.head(5))
+
     # -------- WF
     st.subheader("WF600x2250 – Stock (Nuevo / Usado / Total)")
     stock_wf, uso_wf, alertas_wf, eventos_wf = _simular_pieza(stock_c, obras_c, "WF600x2250", return_events=True)
 
     if stock_wf is not None and not stock_wf.empty:
         step_line_chart(stock_wf, ["nuevo", "usado", "total"], y_title="Piezas", height=260, eventos_df=eventos_wf)
+    else:
+        st.info("No se generó gráfico WF: `stock_wf` vacío. Revisa que `df_stock` tenga columna 'Fecha' con valores y que haya proyectos con Inicio/Fecha requerida.")
 
     st.subheader("WF600x2250 – Uso en obra (Arriendos) + Total")
     if uso_wf is not None and not uso_wf.empty:
