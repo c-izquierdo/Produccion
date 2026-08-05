@@ -5,3 +5,4 @@ openpyxl
 tabulate
 requests
 altair
+starlette==1.3.1
