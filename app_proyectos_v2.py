@@ -1624,12 +1624,13 @@ def alertas_calidad_informacion(df_proy: pd.DataFrame) -> pd.DataFrame:
 
 def alertas_cumplimiento_inicio(df_proy: pd.DataFrame, df_stock: pd.DataFrame) -> pd.DataFrame:
     df = drop_internal_cols(df_proy.copy())
-    df_act = df[pd.to_numeric(df.get("Avance_pct"), errors="coerce").fillna(0) < 100].copy()
-
-    if df_act.empty:
-        return pd.DataFrame(columns=["Proyecto", "Tipo", "Material", "Fecha inicio", "Déficit (pzas)", "Severidad"])
-
-    obras = _obras_from_proyectos_v2(df_act)
+    
+    # 1. NO FILTRAMOS LOS PROYECTOS AQUÍ. Necesitamos toda la historia para calcular el stock real.
+    obras = _obras_from_proyectos_v2(df)
+    
+    # Limpiamos todos los nombres desde la raíz para evitar el bug del espacio "Doña Carlota "
+    obras["Proyecto"] = obras["Proyecto"].astype(str).str.strip()
+    
     stock_c = _clean_stock_dispo_v2(df_stock.copy())
     alertas = []
 
@@ -1689,28 +1690,44 @@ def alertas_cumplimiento_inicio(df_proy: pd.DataFrame, df_stock: pd.DataFrame) -
                 req_usado = float(req_usado if not pd.isna(req_usado) else 0.0)
                 req_nuevo = float(req_nuevo if not pd.isna(req_nuevo) else 0.0)
 
+                available_u = before_any_start_usado - running_usado
+                available_n = before_any_start_nuevo - running_nuevo
+                
+                deficit_total = 0.0
+                
                 if tipo == "VENTA":
-                    req = req_nuevo
-                    available = before_any_start_nuevo - running_nuevo
+                    if available_n < req_nuevo:
+                        deficit_total = req_nuevo - max(available_n, 0.0)
                 else:
-                    req = req_usado + req_nuevo
-                    available = before_any_start_usado - running_usado
+                    if available_u < req_usado:
+                        deficit_total += (req_usado - max(available_u, 0.0))
+                    if available_n < req_nuevo:
+                        deficit_total += (req_nuevo - max(available_n, 0.0))
 
-                if req > 0 and available < req:
+                if deficit_total > 0:
                     alertas.append({
                         "Proyecto": proyecto,
                         "Tipo": tipo,
                         "Material": material,
                         "Fecha inicio": fecha_inicio.date() if pd.notna(fecha_inicio) else "",
-                        "Déficit (pzas)": round(req - max(available, 0.0), 2),
+                        "Déficit (pzas)": round(deficit_total, 2),
                         "Severidad": "Alta",
                     })
 
                 running_usado += float(ev["demanda_usado"])
                 running_nuevo += float(ev["demanda_nuevo"])
 
-    return pd.DataFrame(alertas, columns=["Proyecto", "Tipo", "Material", "Fecha inicio", "Déficit (pzas)", "Severidad"])
+    df_alertas = pd.DataFrame(alertas, columns=["Proyecto", "Tipo", "Material", "Fecha inicio", "Déficit (pzas)", "Severidad"])
+    
+    # 2. APLICAMOS EL FILTRO AL FINAL:
+    # Identificamos qué proyectos aún NO están al 100%
+    proyectos_activos = df[pd.to_numeric(df.get("Avance_pct"), errors="coerce").fillna(0) < 100]["Proyecto"].astype(str).str.strip().tolist()
+    
+    # Filtramos la tabla de alertas para mostrar SOLO las que corresponden a esos proyectos activos
+    if not df_alertas.empty:
+        df_alertas = df_alertas[df_alertas["Proyecto"].isin(proyectos_activos)]
 
+    return df_alertas
 
 def alertas_tab(df_proy: pd.DataFrame, df_stock: pd.DataFrame):
     st.header("🚨 Alertas Operativas")
