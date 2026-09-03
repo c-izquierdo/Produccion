@@ -309,6 +309,9 @@ PROY_COLS = [
     "CE600x1200_usado",
     "CE600x1200_nuevo",
     "Comentario",
+    "Fecha_pago",             # <-- NUEVA
+    "Fecha_firma_contrato",   # <-- NUEVA
+    "Fecha_plazo",   # <-- NUEVA,
 ]
 
 DISPO_STOCK_COLS = [
@@ -653,7 +656,6 @@ def schema_proyectos_keep_rowid(df: pd.DataFrame) -> pd.DataFrame:
     # fechas SOLO date (sin horas)
     core["Fecha_requerida"] = pd.to_datetime(core["Fecha_requerida"], errors="coerce").dt.date
     core["Inicio_obra"] = pd.to_datetime(core["Inicio_obra"], errors="coerce").dt.date
-
     # Numéricos
     core["M2"] = pd.to_numeric(core["M2"], errors="coerce").fillna(0)
     core["Avance_pct"] = pd.to_numeric(core["Avance_pct"], errors="coerce").fillna(0).clip(0, 100)
@@ -678,6 +680,29 @@ def schema_proyectos_keep_rowid(df: pd.DataFrame) -> pd.DataFrame:
 
     # ✅ Comentario siempre texto
     core["Comentario"] = core["Comentario"].fillna("").astype(str)
+
+    # --- NUEVAS COLUMNAS ---
+    core["Fecha_pago"] = pd.to_datetime(core["Fecha_pago"], errors="coerce").dt.date
+    core["Fecha_firma_contrato"] = pd.to_datetime(core["Fecha_firma_contrato"], errors="coerce").dt.date
+    # ==========================================
+    # CÁLCULO AUTOMÁTICO DE FECHA DE PLAZO
+    # ==========================================
+    # 1. Aseguramos que Fecha_pago sea tipo datetime para poder sumarle días
+    pago_dt = pd.to_datetime(core["Fecha_pago"], errors="coerce")
+    
+    # 2. Estandarizamos la columna Tipo en mayúsculas para evitar errores de tipeo
+    tipo_upper = core["Tipo"].astype(str).str.upper()
+    
+    # 3. Creamos las máscaras lógicas (filtros)
+    mask_60_dias = tipo_upper.isin(["ARRIENDO", "ARRIENDO MO", "REPARACIÓN"])
+    mask_90_dias = tipo_upper == "VENTA"
+    
+    # 4. Inicializamos la columna en vacío (NaT)
+    core["Fecha_plazo"] = pd.NaT
+    
+    # 5. Aplicamos la suma de días según corresponda y lo convertimos a ".dt.date" (sin hora)
+    core.loc[mask_60_dias, "Fecha_plazo"] = (pago_dt.loc[mask_60_dias] + pd.to_timedelta(60, unit="D")).dt.date
+    core.loc[mask_90_dias, "Fecha_plazo"] = (pago_dt.loc[mask_90_dias] + pd.to_timedelta(90, unit="D")).dt.date
 
     core[ROWID_COL] = rid.values
     return ensure_rowid(core)
@@ -739,8 +764,8 @@ def _df_height(df, header_px=45, row_px=35, min_px=180):
 def normalizar_proyectos(df_proy: pd.DataFrame) -> pd.DataFrame:
     df = df_proy.copy()
 
-    # Asegurar columnas
-    for c in ["Fecha_requerida", "Inicio_obra", "Tipo"]:
+# Asegurar columnas (opcional agregarlo aquí, pero recomendado)
+    for c in ["Fecha_requerida", "Inicio_obra", "Tipo", "Fecha_pago", "Fecha_firma_contrato", "Fecha_plazo"]:
         if c not in df.columns:
             df[c] = pd.NA
 
@@ -750,6 +775,12 @@ def normalizar_proyectos(df_proy: pd.DataFrame) -> pd.DataFrame:
     # Normalizar fechas a "solo fecha" (sin hora)
     df["Fecha_requerida"] = pd.to_datetime(df["Fecha_requerida"], errors="coerce").dt.date
     df["Inicio_obra"] = pd.to_datetime(df["Inicio_obra"], errors="coerce").dt.date
+
+    # --- NUEVAS COLUMNAS ---
+    df["Fecha_pago"] = pd.to_datetime(df["Fecha_pago"], errors="coerce").dt.date
+    df["Fecha_firma_contrato"] = pd.to_datetime(df["Fecha_firma_contrato"], errors="coerce").dt.date
+    df["Fecha_plazo"] = pd.to_datetime(df["Fecha_plazo"], errors="coerce").dt.date
+    # -----------------------
 
     # Autocompletar Inicio_obra SOLO si está vacío
     mask = df["Inicio_obra"].isna() & df["Fecha_requerida"].notna()
@@ -1298,7 +1329,7 @@ def step_line_chart(df: pd.DataFrame, cols, y_title="Piezas", height=260, evento
     
     # 3. main ya NO lleva ni .add_params() ni .interactive()
     main = alt.layer(*main_layers).properties(height=height)
-    
+
     # ---- Panel detalle (series) ----
     panel_h = max(140, int(height) + 80)
 
@@ -1782,25 +1813,43 @@ with tabs[0]:
     st.header("Datos")
     st.subheader("Proyectos")
 
-    hide_100 = st.checkbox(
-        "Ocultar proyectos al 100%",
-        value=False,
-        key="hide_100_proy"
-    )
-
+# Creamos dos columnas para que los checkboxes queden lado a lado
+    col_f1, col_f2 = st.columns([1, 1])
+    
+    with col_f1:
+        hide_100 = st.checkbox(
+            "Ocultar proyectos al 100%",
+            value=False,
+            key="hide_100_proy"
+        )
+        
+    with col_f2:
+        en_ejecucion = st.checkbox(
+            "Proyectos en ejecución",
+            value=False,
+            help="Muestra solo proyectos donde la fecha de hoy está entre el Inicio y el Término de obra",
+            key="en_ejecucion_proy"
+        )
+        
     # ✅ 1) DEFINIR proy_cfg PRIMERO
     proy_cfg = {
-        "Proyecto": st.column_config.TextColumn("Proyecto", width="medium"),
-        "Constructora": st.column_config.TextColumn("Const.", width="small"),
+        "Proyecto": st.column_config.TextColumn("Proyecto", width="medium", pinned=True),
+        "Constructora": st.column_config.TextColumn("Const.", width="small", pinned=True),
         "Tipo": st.column_config.SelectboxColumn(
             "Tipo",
             options=["Venta", "Arriendo", "Arriendo MO", "Reparación"],
             required=True,
             width="small",
+            pinned=True
         ),
         "Fecha_requerida": st.column_config.DateColumn(
             "F. Req", format="DD-MMM-YYYY", width="small"
         ),
+        # --- NUEVAS COLUMNAS ---
+        "Fecha_pago": st.column_config.DateColumn("F. Pago", format="DD-MMM-YYYY", width="small"),
+        "Fecha_firma_contrato": st.column_config.DateColumn("F. Firma", format="DD-MMM-YYYY", width="small"),
+        "Fecha_plazo": st.column_config.DateColumn("F. Plazo", format="DD-MMM-YYYY", disabled=True, width="small"),
+        # -----------------------
         "Inicio_obra": st.column_config.DateColumn(
             "Inicio_obra", format="DD-MMM-YYYY", width="small"
         ),
@@ -1832,6 +1881,20 @@ with tabs[0]:
     av = pd.to_numeric(view_proy.get("Avance_pct"), errors="coerce").fillna(0)
     if hide_100:
         view_proy = view_proy[av < 100]
+
+    # --- FILTRO 2: Proyectos en ejecución ---
+    if en_ejecucion:
+        # Convertimos la fecha actual base (HOY) y las columnas a datetime para compararlas seguro
+        hoy_ts = pd.Timestamp(HOY).normalize()
+        inicio_ts = pd.to_datetime(view_proy["Inicio_obra"], errors="coerce")
+        termino_ts = pd.to_datetime(view_proy["Termino_obra"], errors="coerce")
+        
+        # Máscara lógica: Inicio <= Hoy <= Termino
+        mask_ejecucion = (inicio_ts <= hoy_ts) & (hoy_ts <= termino_ts)
+        
+        # Filtramos la vista
+        view_proy = view_proy[mask_ejecucion]
+
 
     # ✅ 3) RECIÉN AQUÍ usar proy_cfg
     df_proy = stable_data_editor(
@@ -1952,4 +2015,6 @@ with tabs[4]:
 
 if autosave:
     immediate_autosave("autosave")
+
+
 
