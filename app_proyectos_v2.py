@@ -1249,7 +1249,14 @@ def step_line_chart(df: pd.DataFrame, cols, y_title="Piezas", height=260, evento
     series_domain = list(cols)
     color_series = alt.Color("Serie:N", scale=alt.Scale(domain=series_domain), legend=None)
 
-    nearest = alt.selection_point(name=f"nearest_{uuid.uuid4().hex}", nearest=True, on="mouseover", fields=["Fecha"], empty=False)
+# 1. Nombre estático en lugar de UUID dinámico
+    nearest = alt.selection_point(
+        name="hover", 
+        nearest=True, 
+        on="mouseover", 
+        fields=["Fecha"], 
+        empty=False
+    )
 
     lines_chart = (
         alt.Chart(long)
@@ -1259,9 +1266,18 @@ def step_line_chart(df: pd.DataFrame, cols, y_title="Piezas", height=260, evento
             y=alt.Y("Valor:Q", title=y_title),
             color=color_series,
         )
+        # Si de verdad necesitas zoom, pon .interactive() AQUÍ, no en 'main'
+        # .interactive() 
     )
 
-    selectors = alt.Chart(wide2).mark_point(opacity=0).encode(x="Fecha:T")
+    # 2. El add_params(nearest) DEBE ir pegado a los selectores invisibles
+    selectors = (
+        alt.Chart(wide2)
+        .mark_point(opacity=0)
+        .encode(x="Fecha:T")
+        .add_params(nearest)
+    )
+
     rule = alt.Chart(wide2).mark_rule().encode(x="Fecha:T").transform_filter(nearest)
 
     points = (
@@ -1279,8 +1295,10 @@ def step_line_chart(df: pd.DataFrame, cols, y_title="Piezas", height=260, evento
     zero_line = alt.Chart(pd.DataFrame({"y": [0]})).mark_rule(strokeWidth=3, color="black").encode(y="y:Q")
 
     main_layers = [lines_chart, selectors, points, rule, zero_line]
-    main = alt.layer(*main_layers).add_params(nearest).properties(height=height).interactive()
-
+    
+    # 3. main ya NO lleva ni .add_params() ni .interactive()
+    main = alt.layer(*main_layers).properties(height=height)
+    
     # ---- Panel detalle (series) ----
     panel_h = max(140, int(height) + 80)
 
@@ -1934,6 +1952,4 @@ with tabs[4]:
 
 if autosave:
     immediate_autosave("autosave")
-
-
 
