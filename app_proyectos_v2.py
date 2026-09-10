@@ -297,6 +297,7 @@ PROY_COLS = [
     "Constructora",
     "Tipo",
     "Fecha_requerida",
+    "Activo",     #<--- proyectos no cerrados
     "M2",
     "Avance_pct",
     "Avance_m2",
@@ -653,6 +654,8 @@ def schema_proyectos_keep_rowid(df: pd.DataFrame) -> pd.DataFrame:
 
     core["Tipo"] = core["Tipo"].fillna("").astype(str).str.strip()
 
+    # Debajo de la declaración de las otras columnas nuevas:
+
     # fechas SOLO date (sin horas)
     core["Fecha_requerida"] = pd.to_datetime(core["Fecha_requerida"], errors="coerce").dt.date
     core["Inicio_obra"] = pd.to_datetime(core["Inicio_obra"], errors="coerce").dt.date
@@ -703,6 +706,15 @@ def schema_proyectos_keep_rowid(df: pd.DataFrame) -> pd.DataFrame:
     # 5. Aplicamos la suma de días según corresponda y lo convertimos a ".dt.date" (sin hora)
     core.loc[mask_60_dias, "Fecha_plazo"] = (pago_dt.loc[mask_60_dias] + pd.to_timedelta(60, unit="D")).dt.date
     core.loc[mask_90_dias, "Fecha_plazo"] = (pago_dt.loc[mask_90_dias] + pd.to_timedelta(90, unit="D")).dt.date
+    
+    # === REEMPLAZA O AGREGA ESTO AL FINAL DE schema_proyectos_keep_rowid ===
+    if "Activo" not in core.columns:
+        core["Activo"] = True
+    
+    # Obligamos a que sea un booleano (True/False). Todo será True, 
+    # excepto si explícitamente dice 'false' o '0'
+    core["Activo"] = core["Activo"].map(lambda x: False if str(x).strip().lower() in ['false', '0'] else True).astype(bool)
+
 
     core[ROWID_COL] = rid.values
     return ensure_rowid(core)
@@ -765,7 +777,7 @@ def normalizar_proyectos(df_proy: pd.DataFrame) -> pd.DataFrame:
     df = df_proy.copy()
 
 # Asegurar columnas (opcional agregarlo aquí, pero recomendado)
-    for c in ["Fecha_requerida", "Inicio_obra", "Tipo", "Fecha_pago", "Fecha_firma_contrato", "Fecha_plazo"]:
+    for c in ["Fecha_requerida", "Inicio_obra", "Tipo", "Activo","Fecha_pago", "Fecha_firma_contrato", "Fecha_plazo"]:
         if c not in df.columns:
             df[c] = pd.NA
 
@@ -786,6 +798,10 @@ def normalizar_proyectos(df_proy: pd.DataFrame) -> pd.DataFrame:
     mask = df["Inicio_obra"].isna() & df["Fecha_requerida"].notna()
     df.loc[mask, "Inicio_obra"] = df.loc[mask, "Fecha_requerida"]
 
+    # Al final de la función, antes del return:
+    if "Activo" not in df.columns:
+        df["Activo"] = True
+    df["Activo"] = df["Activo"].fillna(True).astype(bool)
     return df
 
 def normalizar_stock(df_stock: pd.DataFrame) -> pd.DataFrame:
@@ -938,6 +954,7 @@ def _obras_from_proyectos_v2(proy: pd.DataFrame) -> pd.DataFrame:
         Arriendo / Arriendo MO => ARRIENDO
         Reparación => se EXCLUYE de disponibilidad
     """
+
     df = proy.copy()
 
     # Asegurar columnas
@@ -952,6 +969,12 @@ def _obras_from_proyectos_v2(proy: pd.DataFrame) -> pd.DataFrame:
             df[c] = pd.NA
 
     # Limpieza base
+
+    # Al inicio de la limpieza base:
+    df["Activo"] = df.get("Activo", True).fillna(True).astype(bool)
+    df = df[df["Activo"] == True].copy()  # Solo pasamos los proyectos activos
+
+
     df["Proyecto"] = df["Proyecto"].fillna("").astype(str)
     df["Constructora"] = df["Constructora"].fillna("").astype(str)
 
@@ -1570,7 +1593,8 @@ def disponibilidad_tab(stock: pd.DataFrame, proyectos: pd.DataFrame):
 
 def alertas_calidad_informacion(df_proy: pd.DataFrame) -> pd.DataFrame:
     df = drop_internal_cols(df_proy.copy())
-    df_act = df[pd.to_numeric(df.get("Avance_pct"), errors="coerce").fillna(0) < 100].copy()
+    # Para que no exija rellenar todos los datos a proyectos que recién se están evaluando
+    df_act = df[(pd.to_numeric(df.get("Avance_pct"), errors="coerce").fillna(0) < 100) & (df.get("Activo", True) == True)].copy()
 
     if df_act.empty:
         return pd.DataFrame(columns=["Proyecto", "Alerta", "Detalle", "Severidad"])
@@ -1867,6 +1891,7 @@ with tabs[0]:
         "Fecha_firma_contrato": st.column_config.DateColumn("F. Firma", format="DD-MMM-YYYY", width="small"),
         "Fecha_plazo": st.column_config.DateColumn("F. Plazo", format="DD-MMM-YYYY", disabled=True, width="small"),
         # -----------------------
+        "Activo": st.column_config.CheckboxColumn("Activo", default=True, help="Desmarca para proyectos en evaluación no cerrados", width="small"),
         "Inicio_obra": st.column_config.DateColumn(
             "Inicio_obra", format="DD-MMM-YYYY", width="small"
         ),
@@ -1985,8 +2010,10 @@ with tabs[1]:
     )
 
     base = df_proy_now.copy()
+    base = base[base.get("Activo", True) == True] # Filtrar proyectos no cerrados
     if hide_100_taller:
         base = base[pd.to_numeric(base.get("Avance_pct"), errors="coerce").fillna(0) < 100]
+
 
     base["Avance"] = base["Avance_pct"]
     base["Ritmo"] = base["Ritmo_esperado"]
@@ -2031,7 +2058,4 @@ with tabs[4]:
 
 
 if autosave:
-    immediate_autosave("autosave")
-
-
-
+    autosave_if_needed()
