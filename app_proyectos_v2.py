@@ -113,6 +113,8 @@ def current_state_signature() -> str:
         _df_signature(st.session_state.get("df_proy")),
         _df_signature(st.session_state.get("df_stock")),
         _df_signature(st.session_state.get("df_lav")),
+        _df_signature(st.session_state.get("df_inv")),
+        _df_signature(st.session_state.get("df_req")), # <-- NUEVO
     ]
     return hashlib.sha256("|".join(parts).encode("utf-8")).hexdigest()
 
@@ -122,9 +124,12 @@ def immediate_autosave(reason: str = "cambio"):
         st.session_state.get("df_proy", pd.DataFrame()),
         st.session_state.get("df_stock", pd.DataFrame()),
         st.session_state.get("df_lav", pd.DataFrame()),
+        st.session_state.get("df_inv", pd.DataFrame()), # <-- ¡AQUÍ ESTÁ EL ARGUMENTO FALTANTE!
+        st.session_state.get("df_req", pd.DataFrame()), # <-- NUEVO
     )
 
     if ok:
+        st.session_state["last_saved_signature"] = current_state_signature()
         notify("✅ Guardado en GitHub")
         return True
     else:
@@ -195,53 +200,50 @@ if not check_password():
 st.markdown(
     """
 <style>
-:root{
-  --tabs-top: 3.25rem;     /* distancia desde arriba */
-  --tabs-h: 3.0rem;        /* alto barra tabs */
-  --sidebar-open-w: 21rem; /* ancho sidebar cuando está abierto (ajustable) */
+/* 1. ELIMINAR EL HUECO BLANCO SUPERIOR DE STREAMLIT */
+/* Esto es lo que realmente hace que toda la app (y el menú) suba hacia el techo */
+.block-container {
+    padding-top: 1.5rem !important; 
 }
 
-/* Barra tabs fija */
-.stTabs [data-baseweb="tab-list"]{
-  position: fixed !important;
-  top: var(--tabs-top);
-  left: 0;
-  right: 0;
-  z-index: 10000;
-  background: var(--background-color, white);
-  border-bottom: 1px solid rgba(49, 51, 63, 0.15);
-  padding-left: 4.5rem;
-  padding-right: 1rem;
-  overflow-x: auto;
-  white-space: nowrap;
+/* 2. BARRA DE TABS STICKY (NATIVA Y SIN FALLOS) */
+/* 'sticky' se pega al hacer scroll sin sacarlo del flujo del documento, 
+   por lo que no necesitas recalcular el ancho cuando abres el sidebar. */
+div[data-testid="stTabs"] > div[data-baseweb="tab-list"],
+div[data-testid="stTabs"] > div[role="tablist"] {
+    position: sticky !important;
+    top: 0rem !important; /* Se ancla justo debajo de la barra transparente de Streamlit. */
+    z-index: 999990 !important;
+    background-color: #ffffff !important;
+    border-bottom: 1px solid rgba(128, 128, 128, 0.2) !important;
+    padding-top: 0.5rem !important;
+    padding-bottom: 0.5rem !important;
 }
 
-/* Empujar contenido para que no se tape bajo la barra */
-.stTabs [data-baseweb="tab-panel"]{
-  margin-top: var(--tabs-h);
+/* Fondo dinámico para el modo oscuro */
+@media (prefers-color-scheme: dark) {
+    div[data-testid="stTabs"] > div[data-baseweb="tab-list"],
+    div[data-testid="stTabs"] > div[role="tablist"] {
+        background-color: #0e1117 !important;
+    }
 }
 
-/* ✅ Cuando el sidebar está ABIERTO: corre la barra tabs a la derecha */
-body:has(section[data-testid="stSidebar"][aria-expanded="true"])
-.stTabs [data-baseweb="tab-list"]{
-  left: var(--sidebar-open-w) !important;
-  width: calc(100% - var(--sidebar-open-w)) !important;
-  padding-left: 1rem;
+/* 3. LÓGICA DEL SIDEBAR OCULTO */
+:root {
+  --sidebar-open-w: 21rem;
 }
-
-/* -------------------------- */
-/* Ocultar sidebar por defecto */
-section[data-testid="stSidebar"]{
+section[data-testid="stSidebar"] {
     transform: translateX(calc(-1 * var(--sidebar-open-w))) !important;
     transition: transform .28s ease-in-out !important;
 }
-section[data-testid="stSidebar"][aria-expanded="true"]{
+section[data-testid="stSidebar"][aria-expanded="true"] {
     transform: translateX(0) !important;
 }
 </style>
 """,
     unsafe_allow_html=True
 )
+
 
 # Botón HTML/JS para alternar el sidebar (inicialmente escondido)
 components.html(
@@ -337,55 +339,56 @@ LAVADO_COLS = [
 ]
 
 def load_all_data():
-    """Carga desde Excel (o crea vacíos) y normaliza proyectos."""
+    """Carga desde Excel (o crea vacíos) y normaliza los 4 dataframes."""
     if XLSX_PATH.exists():
         proy = pd.read_excel(XLSX_PATH, sheet_name="proyectos")
         stock = pd.read_excel(XLSX_PATH, sheet_name="stock_dispo")
         lav = pd.read_excel(XLSX_PATH, sheet_name="lavado")
+        try:
+            inv = pd.read_excel(XLSX_PATH, sheet_name="inventario")
+        except:
+            inv = pd.DataFrame(columns=["Nombre"])
+        try: # <-- NUEVO: Intentar leer requerimientos
+            req = pd.read_excel(XLSX_PATH, sheet_name="req_proyectos")
+        except:
+            req = pd.DataFrame(columns=["Nombre"])
     else:
         proy = pd.DataFrame(columns=PROY_COLS)
         stock = pd.DataFrame(columns=DISPO_STOCK_COLS)
         lav = pd.DataFrame(columns=LAVADO_COLS)
+        inv = pd.DataFrame(columns=["Nombre"])
+        req = pd.DataFrame(columns=["Nombre"]) # <-- NUEVO
 
-    # Normaliza tipo/fechas + autocompleta inicio_obra si está vacío
     proy = normalizar_proyectos(proy)
     stock = normalizar_stock(stock)
     lav = normalizar_lavado(lav)
+    inv = normalizar_inventario(inv)
+    req = normalizar_req_proyectos(req) # <-- NUEVO
 
-    return proy, stock, lav
+    return proy, stock, lav, inv, req
 
-
-
-def save_all_data(proy, stock, lav):
+def save_all_data(proy, stock, lav, inv, req):
     try:
-        proy_to_save = normalizar_proyectos(proy.copy())
-        stock_to_save = normalizar_stock(stock.copy())
-        lav_to_save = normalizar_lavado(lav.copy())
+        proy_to_save = drop_internal_cols(normalizar_proyectos(proy.copy()))
+        stock_to_save = drop_internal_cols(normalizar_stock(stock.copy()))
+        lav_to_save = drop_internal_cols(normalizar_lavado(lav.copy()))
+        inv_to_save = drop_internal_cols(normalizar_inventario(inv.copy()))
+        req_to_save = drop_internal_cols(normalizar_req_proyectos(req.copy())) # <-- NUEVO
 
-        proy_to_save = drop_internal_cols(proy_to_save)
-        stock_to_save = drop_internal_cols(stock_to_save)
-        lav_to_save = drop_internal_cols(lav_to_save)
-
-        # Guardar Excel local temporal
         with pd.ExcelWriter(XLSX_PATH, engine="openpyxl", mode="w") as writer:
             proy_to_save.to_excel(writer, sheet_name="proyectos", index=False)
             stock_to_save.to_excel(writer, sheet_name="stock_dispo", index=False)
             lav_to_save.to_excel(writer, sheet_name="lavado", index=False)
+            inv_to_save.to_excel(writer, sheet_name="inventario", index=False)
+            req_to_save.to_excel(writer, sheet_name="req_proyectos", index=False) # <-- NUEVO
 
-        # Subir el archivo a GitHub
-        save_to_github(str(XLSX_PATH), commit_message="Actualización de datos desde Streamlit")
+        save_to_github(str(XLSX_PATH), commit_message="Actualización desde Streamlit")
 
         st.session_state["last_save_ts"] = time.time()
         st.session_state["last_save_ok"] = True
-        st.session_state["last_save_detail"] = "Guardado en GitHub"
-
         return True, "Guardado en GitHub"
-
     except Exception as e:
-        st.session_state["last_save_ok"] = False
-        st.session_state["last_save_detail"] = str(e)
         return False, str(e)
-
 
 def df_to_markdown_safe(df: pd.DataFrame, index: bool = False) -> str:
     """Convierte DataFrame a markdown sin fallar si falta 'tabulate'."""
@@ -493,12 +496,17 @@ def export_block(df: pd.DataFrame, *, name: str, key_prefix: str):
 def ensure_rowid(df: pd.DataFrame, col: str = ROWID_COL) -> pd.DataFrame:
     """Asegura __rowid no nulo, único y estable."""
     df = df.copy()
+    
     if col not in df.columns:
-        df[col] = [uuid.uuid4().hex for _ in range(len(df))]
+        # Al asignar una lista vacía, pandas puede darle tipo float64. 
+        # Usamos pd.Series forzando dtype=object (texto) para evitarlo.
+        df[col] = pd.Series([uuid.uuid4().hex for _ in range(len(df))], dtype=object)
     else:
         df[col] = df[col].astype(str)
 
-    mask = df[col].isna() | (df[col].str.strip() == "") | (df[col].str.lower() == "nan")
+    # Añadimos .astype(str) justo antes de usar .str para evitar el AttributeError
+    mask = df[col].isna() | (df[col].astype(str).str.strip() == "") | (df[col].astype(str).str.lower() == "nan")
+    
     if mask.any():
         df.loc[mask, col] = [uuid.uuid4().hex for _ in range(int(mask.sum()))]
 
@@ -517,6 +525,7 @@ def ensure_rowid(df: pd.DataFrame, col: str = ROWID_COL) -> pd.DataFrame:
     # __rowid al final
     cols = [c for c in df.columns if c != col] + [col]
     return df[cols]
+
 
 def drop_internal_cols(df: pd.DataFrame) -> pd.DataFrame:
     return df.drop(columns=[c for c in df.columns if c.startswith("__")], errors="ignore")
@@ -602,6 +611,7 @@ def stable_data_editor(
     view_df: pd.DataFrame | None = None,
     height: int | None = None,
     num_rows: str = "dynamic",
+    index_col: str | None = None, # <--- NUEVO PARÁMETRO
 ):
     """Editor estable: permite editar/agregar/borrar incluso con view_df filtrada, usando __rowid."""
     if df_key not in st.session_state:
@@ -620,6 +630,12 @@ def stable_data_editor(
     # Mapa de filas visibles -> __rowid
     st.session_state[f"{widget_key}__rowids"] = editor_df[ROWID_COL].astype(str).tolist()
 
+    # --- NUEVA LÓGICA PARA CONGELAR COLUMNA ---
+    hide_idx = True
+    if index_col and index_col in editor_df.columns:
+        editor_df = editor_df.set_index(index_col)
+        hide_idx = False
+
     def _cb():
         _apply_editor_delta(df_key, widget_key, schema_fn)
 
@@ -631,7 +647,7 @@ def stable_data_editor(
     st.data_editor(
         editor_df,
         num_rows=num_rows,
-        hide_index=True,
+        hide_index=hide_idx, # <--- USA LA VARIABLE PARA MOSTRAR EL ÍNDICE SI EXISTE
         use_container_width=True,
         column_config=column_config,
         key=widget_key,
@@ -757,10 +773,71 @@ def schema_lavado_keep_rowid(df: pd.DataFrame) -> pd.DataFrame:
     core[ROWID_COL] = rid.values
     return ensure_rowid(core)
 
+def normalizar_inventario(df_inv: pd.DataFrame) -> pd.DataFrame:
+    df = df_inv.copy()
+    if "Nombre" not in df.columns:
+        df.insert(0, "Nombre", pd.NA)
+    if "Stock_minimo" not in df.columns:
+        df.insert(1, "Stock_minimo", 0)
+        
+    df["Nombre"] = df["Nombre"].fillna("").astype(str)
+    df["Stock_minimo"] = pd.to_numeric(df["Stock_minimo"], errors="coerce").fillna(0).astype(int)
+    return df
 
+def schema_inventario_keep_rowid(df: pd.DataFrame) -> pd.DataFrame:
+    out = ensure_rowid(df)
+    rid = out[ROWID_COL].astype(str).copy()
+    core = drop_internal_cols(out).copy()
+
+    if "Nombre" not in core.columns:
+        core.insert(0, "Nombre", "")
+    core["Nombre"] = core["Nombre"].fillna("").astype(str)
+
+    if "Stock_minimo" not in core.columns:
+        core.insert(1, "Stock_minimo", 0)
+
+    # Transformar a enteros (stock) todas las columnas dinámicas y el stock mínimo
+    for c in core.columns:
+        if c != "Nombre":
+            core[c] = pd.to_numeric(core[c], errors="coerce").fillna(0).astype(int)
+
+    # Ordenar para que Nombre y Stock_minimo vayan primero, luego las fechas
+    cols = ["Nombre", "Stock_minimo"] + [c for c in core.columns if c not in ["Nombre", "Stock_minimo"]]
+    core = core[cols]
+
+    core[ROWID_COL] = rid.values
+    return ensure_rowid(core)
 # ============================================================
 # ALTURA DINÁMICA (MUESTRA TODAS LAS FILAS)
 # ============================================================
+def normalizar_req_proyectos(df_req: pd.DataFrame) -> pd.DataFrame:
+    df = df_req.copy()
+    if "Nombre" not in df.columns:
+        df.insert(0, "Nombre", pd.NA)
+    df["Nombre"] = df["Nombre"].fillna("").astype(str)
+    return df
+
+def schema_req_proyectos_keep_rowid(df: pd.DataFrame) -> pd.DataFrame:
+    out = ensure_rowid(df)
+    rid = out[ROWID_COL].astype(str).copy()
+    core = drop_internal_cols(out).copy()
+
+    if "Nombre" not in core.columns:
+        core.insert(0, "Nombre", "")
+    core["Nombre"] = core["Nombre"].fillna("").astype(str)
+
+    # Transformar a enteros las cantidades por proyecto
+    for c in core.columns:
+        if c != "Nombre":
+            core[c] = pd.to_numeric(core[c], errors="coerce").fillna(0).astype(int)
+
+    # Ordenar para que Nombre vaya primero, luego los proyectos
+    cols = ["Nombre"] + [c for c in core.columns if c != "Nombre"]
+    core = core[cols]
+
+    core[ROWID_COL] = rid.values
+    return ensure_rowid(core)
+
 
 def _df_height(df, header_px=45, row_px=35, min_px=180):
     if df is None:
@@ -1823,30 +1900,32 @@ else:
 # ============================================================
 
 if "df_proy" not in st.session_state:
-    proy, stock, lav = load_all_data()
+    proy, stock, lav, inv, req = load_all_data()
     st.session_state["df_proy"] = schema_proyectos_keep_rowid(proy)
     st.session_state["df_stock"] = schema_stock_keep_rowid(stock)
     st.session_state["df_lav"] = schema_lavado_keep_rowid(lav)
+    st.session_state["df_inv"] = schema_inventario_keep_rowid(inv)
+    st.session_state["df_req"] = schema_req_proyectos_keep_rowid(req) # <-- NUEVO
 else:
-    # Por si venía de versión antigua sin __rowid
     st.session_state["df_proy"] = schema_proyectos_keep_rowid(st.session_state["df_proy"])
     st.session_state["df_stock"] = schema_stock_keep_rowid(st.session_state["df_stock"])
     st.session_state["df_lav"] = schema_lavado_keep_rowid(st.session_state["df_lav"])
-
+    st.session_state["df_inv"] = schema_inventario_keep_rowid(st.session_state.get("df_inv", pd.DataFrame()))
+    st.session_state["df_req"] = schema_req_proyectos_keep_rowid(st.session_state.get("df_req", pd.DataFrame())) # <-- NUEVO
 
 df_proy = st.session_state["df_proy"]
 df_stock = st.session_state["df_stock"]
 df_lav = st.session_state["df_lav"]
+df_inv = st.session_state["df_inv"]
 
 if "last_saved_signature" not in st.session_state:
     st.session_state["last_saved_signature"] = current_state_signature()
-
 
 # ============================================================
 # TABS
 # ============================================================
 
-tabs = st.tabs(["📚 Datos", "🧰 Taller", "🧽 Lavado", "📦 Disponibilidad", "🚨 Alertas"])
+tabs = st.tabs(["📚 Datos", "🧰 Taller", "🧽 Lavado", "📦 Disponibilidad", "🚨 Alertas", "📋 Inventario"])
 
 
 # ================= DATOS =================
@@ -2055,6 +2134,192 @@ with tabs[3]:
 # ================= ALERTAS =================
 with tabs[4]:
     alertas_tab(st.session_state["df_proy"], st.session_state["df_stock"])
+
+# ================= INVENTARIO =================
+with tabs[5]:
+    st.header("Inventario de Materias Primas")
+    st.caption("Añade nuevas filas con el nombre de la pieza y agrega semanas para ver el histórico de stock.")
+
+    # 1. Controles para agregar nueva columna
+    col_fecha, col_btn, _ = st.columns([2, 2, 6])
+    with col_fecha:
+        nueva_fecha = st.date_input("Fecha para nueva semana")
+    with col_btn:
+        st.write("") 
+        st.write("")
+    if st.button("➕ Agregar semana", use_container_width=True):
+        col_name = nueva_fecha.strftime("%d-%m-%y")
+        df_actual = st.session_state["df_inv"]
+        
+        if col_name not in df_actual.columns:
+            st.session_state["df_inv"][col_name] = 0
+            st.session_state["df_inv"] = schema_inventario_keep_rowid(st.session_state["df_inv"])
+        else:
+            st.warning("Esta fecha ya existe en el inventario.")
+
+    # 2. Configuración de columnas (Ocultamos Stock_minimo de esta vista)
+    inv_cfg = {
+        "Nombre": st.column_config.TextColumn("Nombre", width="medium", pinned=True, required=True)
+    }
+    
+    cols_fechas_view = [c for c in st.session_state["df_inv"].columns if c not in ["Nombre", "Stock_minimo", ROWID_COL] and not c.startswith("__")]
+    for c in cols_fechas_view:
+        inv_cfg[c] = st.column_config.NumberColumn(c, width="small", min_value=0, step=1)
+
+    # Creamos una vista que NO incluya Stock_minimo para la tabla 1
+    view_inv_historico = st.session_state["df_inv"][["Nombre", ROWID_COL] + cols_fechas_view]
+
+    # 3. Mostrar el Data Editor interactivo
+    df_inv_editado = stable_data_editor(
+        df_key="df_inv",
+        widget_key="editor_inventario",
+        column_config=inv_cfg,
+        schema_fn=schema_inventario_keep_rowid,
+        view_df=view_inv_historico, # <-- Pasamos la vista filtrada
+        height=_df_height(view_inv_historico, min_px=400),
+        num_rows="dynamic",
+        index_col="Nombre", 
+    )
+
+    st.subheader("Totales por semana")
+    if cols_fechas_view:
+        totales = df_inv_editado[cols_fechas_view].sum()
+        df_totales = pd.DataFrame(totales).T
+        df_totales.index = ["Total"]
+        st.dataframe(df_totales, use_container_width=True)
+    else:
+        st.info("Agrega columnas usando el selector de fechas arriba para comenzar a medir.")
+
+    # =========================================================
+    # TABLA 2: REQUERIMIENTOS POR PROYECTO (AUTOMATIZADA)
+    # =========================================================
+    st.divider()
+    st.header("Requerimientos por Proyecto")
+    st.caption("Las columnas se sincronizan automáticamente con los proyectos de la pestaña Datos cuya 'F. Req' es futura o de máximo 1 mes de antigüedad.")
+
+    df_p = st.session_state["df_proy"]
+    df_req_actual = st.session_state["df_req"]
+
+    fecha_limite = HOY.date()
+    req_dates = pd.to_datetime(df_p["Fecha_requerida"], errors="coerce").dt.date
+
+    mask_fecha = req_dates.notna() & (req_dates >= fecha_limite)
+    mask_nombre = df_p["Proyecto"].astype(str).str.strip() != ""
+    mask_activo = df_p.get("Activo", True) == True
+
+    proyectos_validos = df_p.loc[mask_fecha & mask_nombre & mask_activo, "Proyecto"].astype(str).str.strip().unique().tolist()
+
+    hubo_cambios = False
+    for proj in proyectos_validos:
+        if proj not in df_req_actual.columns:
+            df_req_actual[proj] = 0
+            hubo_cambios = True
+
+    if hubo_cambios:
+        st.session_state["df_req"] = schema_req_proyectos_keep_rowid(df_req_actual)
+
+    cols_to_show = ["Nombre", ROWID_COL] + [p for p in proyectos_validos if p in st.session_state["df_req"].columns]
+    view_req = st.session_state["df_req"][cols_to_show]
+
+    req_cfg = {
+        "Nombre": st.column_config.TextColumn("Pieza (Nombre)", width="medium", pinned=True, required=True)
+    }
+    
+    cols_proyectos_view = [c for c in proyectos_validos if c in view_req.columns]
+    for c in cols_proyectos_view:
+        req_cfg[c] = st.column_config.NumberColumn(c, width="small", min_value=0, step=1)
+
+    df_req_editado = stable_data_editor(
+        df_key="df_req",
+        widget_key="editor_req_proyectos_auto",
+        column_config=req_cfg,
+        schema_fn=schema_req_proyectos_keep_rowid,
+        view_df=view_req,
+        height=_df_height(view_req, min_px=400),
+        num_rows="dynamic",
+        index_col="Nombre",
+    )
+
+    # =========================================================
+    # TABLA 3: RESUMEN DE INVENTARIO
+    # =========================================================
+    st.divider()
+    st.header("Tabla Resumen")
+    st.caption("Compara el stock reciente con los requerimientos actuales. Solo el 'Stock Mínimo' es editable aquí.")
+
+    # 1. Obtener última semana
+    ultima_semana_col = cols_fechas_view[-1] if cols_fechas_view else None
+
+    # 2. Calcular suma de requerimientos
+    req_map = {}
+    if cols_proyectos_view:
+        df_req_sum = df_req_editado.copy()
+        df_req_sum["Suma_req"] = df_req_sum[cols_proyectos_view].sum(axis=1)
+        req_map = df_req_sum.set_index("Nombre")["Suma_req"].to_dict()
+
+    # 3. Construir la vista para el resumen
+    df_inv_current = st.session_state["df_inv"].copy()
+    view_resumen = df_inv_current[["Nombre", "Stock_minimo", ROWID_COL]].copy()
+    
+    # Agregar valores (lectura)
+    view_resumen["Stock_ultima_semana"] = df_inv_current[ultima_semana_col] if ultima_semana_col else 0
+    view_resumen["Cantidad_requerida"] = view_resumen["Nombre"].map(req_map).fillna(0).astype(int)
+
+     
+    # --- LÓGICA ACTUALIZADA: Evaluar estado en base al futuro disponible ---
+    def evaluar_estado(row):
+
+        por_pedir = row["Stock_minimo"] + row["Cantidad_requerida"] - row["Stock_ultima_semana"]
+        minimo = row["Stock_minimo"]
+
+        if por_pedir < 0:
+            por_pedir = 0
+
+        # Si el stock futuro disponible es negativo, no alcanza para las obras
+        if por_pedir > minimo:
+            return f"🔴 Sin Stock" 
+        # Si el stock futuro disponible es menor al límite de seguridad
+        elif por_pedir < minimo:
+            return f"🟡 Bajo Mínimo"
+        # Si sobra stock y cubre el mínimo de seguridad
+        else:
+            return f"🟢 Todo bien"
+        
+    def pedir(row):
+        por_pedir = row["Stock_minimo"] + row["Cantidad_requerida"] - row["Stock_ultima_semana"]
+
+        if por_pedir < 0:
+            por_pedir = 0
+
+        return por_pedir
+
+    # --- NUEVA COLUMNA: Cálculo de cantidad futura disponible ---
+    
+    view_resumen["Stock_Futuro"] = view_resumen.apply(pedir, axis=1)
+
+    view_resumen["Estado"] = view_resumen.apply(evaluar_estado, axis=1)
+
+    # 4. Configurar el editor
+    resumen_cfg = {
+        "Nombre": st.column_config.TextColumn("Pieza (Nombre)", disabled=True, pinned=True),
+        "Stock_minimo": st.column_config.NumberColumn("Stock Mínimo ✏️", min_value=0, step=1, help="Edita el stock mínimo aquí"),
+        "Stock_ultima_semana": st.column_config.NumberColumn("Stock Últ. Semana", disabled=True),
+        "Cantidad_requerida": st.column_config.NumberColumn("Proyectos futuros", disabled=True),
+        "Stock_Futuro": st.column_config.NumberColumn("Pedido", disabled=True, help="Stock Últ. Semana - Cant. Requerida"),
+        "Estado": st.column_config.TextColumn("Estado", disabled=True)
+    }
+
+    # 5. Renderizar la tabla (num_rows="fixed" evita que agreguen piezas desde aquí, deben hacerlo arriba)
+    df_resumen = stable_data_editor(
+        df_key="df_inv",
+        widget_key="editor_resumen_inventario_v3",
+        column_config=resumen_cfg,
+        schema_fn=schema_inventario_keep_rowid,
+        view_df=view_resumen,
+        height=_df_height(view_resumen, min_px=300),
+        num_rows="fixed", 
+        index_col="Nombre"
+    )
 
 
 if autosave:
